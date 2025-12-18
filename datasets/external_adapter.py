@@ -1,0 +1,130 @@
+"""
+Adapter to wrap an external PairedImageDataset (noisy, clean, label) and
+produce bit-plane tensors + patch-level mask compatible with BitPlaneFormer.
+"""
+import importlib.util
+import os
+import random
+from types import ModuleType
+from typing import Optional
+
+import torch
+from torch.utils.data import Dataset
+
+from .bitplane_utils import lsb_xor_mask, make_lsb_msb, pool_to_patch_mask, to_uint8
+
+
+def _load_module(module_path: str) -> ModuleType:
+    spec = importlib.util.spec_from_file_location("external_dataloader", module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load module from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _random_crop_pair(
+    img_a: torch.Tensor, img_b: torch.Tensor, crop_size: Optional[int]
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if crop_size is None:
+        return img_a, img_b
+    _, h, w = img_a.shape
+    if crop_size > h or crop_size > w:
+        raise ValueError(f"crop_size {crop_size} exceeds image size {(h, w)}")
+    top = random.randint(0, h - crop_size)
+    left = random.randint(0, w - crop_size)
+    slc = (slice(top, top + crop_size), slice(left, left + crop_size))
+    return img_a[:, slc[0], slc[1]], img_b[:, slc[0], slc[1]]
+
+
+def _augment_pair(img_a: torch.Tensor, img_b: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    if random.random() < 0.5:
+        img_a = torch.flip(img_a, dims=[2])  # horizontal flip
+        img_b = torch.flip(img_b, dims=[2])
+    if random.random() < 0.5:
+        img_a = torch.flip(img_a, dims=[1])  # vertical flip
+        img_b = torch.flip(img_b, dims=[1])
+    k = random.randint(0, 3)
+    if k:
+        img_a = torch.rot90(img_a, k=k, dims=[1, 2])
+        img_b = torch.rot90(img_b, k=k, dims=[1, 2])
+    return img_a, img_b
+
+
+class ExternalPairedBitPlaneDataset(Dataset):
+    """
+    Wrap an external PairedImageDataset (noisy, clean, label) and add bit-plane/mask outputs.
+
+    Expected external dataset signature: dataset[idx] -> (noisy, clean, label)
+    where noisy/clean are float tensors in [0,1], shape (3,H,W).
+    """
+
+    def __init__(
+        self,
+        module_path: str,
+        root_dir: str,
+        patch_size: int = 8,
+        crop_size: Optional[int] = None,
+        augment: bool = False,
+        return_mask_flat: bool = False,
+    ):
+        super().__init__()
+        self.patch_size = patch_size
+        self.crop_size = crop_size
+        self.augment = augment
+        self.return_mask_flat = return_mask_flat
+
+        if self.crop_size is not None and (self.crop_size % self.patch_size != 0):
+            raise ValueError("crop_size must be divisible by patch_size")
+
+        module = _load_module(module_path)
+        if not hasattr(module, "PairedImageDataset"):
+            raise AttributeError(f"Module {module_path} has no PairedImageDataset")
+        PairedImageDataset = getattr(module, "PairedImageDataset")
+        self.base_dataset = PairedImageDataset(root_dir=root_dir, transform=None)
+
+    def __len__(self) -> int:
+        return len(self.base_dataset)
+
+    def __getitem__(self, idx: int) -> dict:
+        noisy, clean, label = self.base_dataset[idx]
+        noisy = noisy.to(torch.float32)
+        clean = clean.to(torch.float32)
+
+        if noisy.shape != clean.shape:
+            raise ValueError(f"Shape mismatch for pair idx {idx}: {noisy.shape} vs {clean.shape}")
+
+        noisy, clean = _random_crop_pair(noisy, clean, self.crop_size)
+        if self.augment:
+            noisy, clean = _augment_pair(noisy, clean)
+
+        _, H, W = noisy.shape
+        if H % self.patch_size != 0 or W % self.patch_size != 0:
+            raise ValueError(f"Image size {(H, W)} not divisible by patch_size {self.patch_size}")
+
+        noisy_u8 = to_uint8(noisy)
+        clean_u8 = to_uint8(clean)
+
+        lsb, msb = make_lsb_msb(noisy_u8)
+        mask_pix = lsb_xor_mask(noisy_u8, clean_u8)
+        mask_gt = pool_to_patch_mask(mask_pix, self.patch_size)
+        if self.return_mask_flat:
+            mask_gt = mask_gt.flatten().unsqueeze(1)  # (h*w, 1)
+
+        # Try to include paths if the external dataset stores them.
+        path_noisy, path_clean = None, None
+        samples = getattr(self.base_dataset, "samples", None)
+        if samples is not None and len(samples) > idx:
+            path_noisy = samples[idx][0]
+            path_clean = samples[idx][1]
+
+        return {
+            "x": noisy,
+            "y": clean,
+            "lsb": lsb,
+            "msb": msb,
+            "mask_gt": mask_gt,
+            "label": label,
+            "path_noisy": path_noisy,
+            "path_clean": path_clean,
+        }
