@@ -18,6 +18,7 @@ def _load_image_as_tensor(path: str) -> torch.Tensor:
         img = img.convert("RGB")
         arr = np.array(img, dtype=np.uint8)  # H x W x 3
     tensor = torch.from_numpy(arr).permute(2, 0, 1).to(torch.float32) / 255.0
+    print("幹嘛要加這行")
     return tensor
 
 
