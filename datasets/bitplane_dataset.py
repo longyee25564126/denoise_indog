@@ -1,7 +1,7 @@
 import os
 import random
 from typing import List, Optional, Tuple
-
+#幹嘛要加這行
 import numpy as np
 import torch
 from PIL import Image
