@@ -67,12 +67,14 @@ class ExternalPairedBitPlaneDataset(Dataset):
         crop_size: Optional[int] = None,
         augment: bool = False,
         return_mask_flat: bool = False,
+        split: str = "train",
     ):
         super().__init__()
         self.patch_size = patch_size
         self.crop_size = crop_size
         self.augment = augment
         self.return_mask_flat = return_mask_flat
+        self.split = split
 
         if self.crop_size is not None and (self.crop_size % self.patch_size != 0):
             raise ValueError("crop_size must be divisible by patch_size")
@@ -81,7 +83,11 @@ class ExternalPairedBitPlaneDataset(Dataset):
         if not hasattr(module, "PairedImageDataset"):
             raise AttributeError(f"Module {module_path} has no PairedImageDataset")
         PairedImageDataset = getattr(module, "PairedImageDataset")
-        self.base_dataset = PairedImageDataset(root_dir=root_dir, transform=None)
+        try:
+            self.base_dataset = PairedImageDataset(root_dir=root_dir, split=split, transform=None)
+        except TypeError:
+            # Fallback if external class does not support split
+            self.base_dataset = PairedImageDataset(root_dir=root_dir, transform=None)
 
     def __len__(self) -> int:
         return len(self.base_dataset)
