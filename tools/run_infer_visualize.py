@@ -92,6 +92,7 @@ def main() -> None:
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint.")
     parser.add_argument("--device", type=str, default=None, help='Device (default: "cuda" if available else "cpu").')
     parser.add_argument("--save-dir", type=str, default="outputs/infer_vis", help="Directory to save visualizations.")
+    parser.add_argument("--dec-type", type=str, default=None, choices=["fuse_encoder", "decoder_q_msb", "std_encdec_msb"], help="Decoder variant; if None, try to read from checkpoint.")
     args = parser.parse_args()
 
     device_str = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -127,9 +128,22 @@ def main() -> None:
         patch_size=args.patch_size,
         lsb_bits=args.lsb_bits,
         msb_bits=args.msb_bits,
+        dec_type=args.dec_type or "fuse_encoder",
     ).to(device)
     if args.checkpoint:
         ckpt = torch.load(args.checkpoint, map_location=device)
+        if args.dec_type is None and isinstance(ckpt, dict):
+            ckpt_args = ckpt.get("args", {})
+            if isinstance(ckpt_args, dict) and "dec_type" in ckpt_args:
+                ckpt_dec = ckpt_args["dec_type"]
+                if ckpt_dec != model.dec_type:
+                    model = BitPlaneFormerV1(
+                        patch_size=args.patch_size,
+                        lsb_bits=args.lsb_bits,
+                        msb_bits=args.msb_bits,
+                        dec_type=ckpt_dec,
+                    ).to(device)
+                    print(f"Rebuilt model with dec_type from checkpoint: {ckpt_dec}")
         model.load_state_dict(ckpt["model"])
         print(f"Loaded checkpoint from {args.checkpoint}")
     model.eval()
@@ -141,32 +155,55 @@ def main() -> None:
     y_hat = out["y_hat"].clamp(0.0, 1.0).squeeze(0)
     x_vis = x.squeeze(0)
     y_vis = y.squeeze(0)
-    m_pred = out["m_hat"].detach().cpu().squeeze(0)
+    m_pred = out.get("m_hat", None)
     m_gt = mask_gt.cpu().squeeze(0)
+
+    # Build a 5-grid image: noisy, clean, denoised, mask_pred (if exists), mask_gt
+    def to_uint8_img(t: torch.Tensor, mode: str) -> Image.Image:
+        return tensor_to_pil(t)
+
+    imgs = [
+        ("noisy", to_uint8_img(x_vis, "RGB")),
+        ("clean", to_uint8_img(y_vis, "RGB")),
+        ("denoised", to_uint8_img(y_hat, "RGB")),
+    ]
+    if m_pred is not None:
+        imgs.append(("mask_pred", tensor_to_pil(m_pred.detach().cpu().squeeze(0))))
+    imgs.append(("mask_gt", tensor_to_pil(m_gt)))
+
+    # Determine grid layout (single row)
+    widths = [img.size[0] for _, img in imgs]
+    heights = [img.size[1] for _, img in imgs]
+    max_h = max(heights)
+    total_w = sum(widths)
+    grid = Image.new("RGB", (total_w, max_h), color=(0, 0, 0))
+
+    x_offset = 0
+    draw_positions = {}
+    for name, img in imgs:
+        if img.mode != "RGB":
+            img_rgb = img.convert("RGB")
+        else:
+            img_rgb = img
+        grid.paste(img_rgb, (x_offset, 0))
+        draw_positions[name] = x_offset
+        x_offset += img_rgb.size[0]
 
     os.makedirs(args.save_dir, exist_ok=True)
     stem = os.path.splitext(os.path.basename(sample.get("path_noisy") or f"idx_{idx}"))[0]
-    paths = {
-        "noisy": os.path.join(args.save_dir, f"{stem}_noisy.png"),
-        "clean": os.path.join(args.save_dir, f"{stem}_clean.png"),
-        "denoised": os.path.join(args.save_dir, f"{stem}_denoised.png"),
-        "mask_pred": os.path.join(args.save_dir, f"{stem}_mask_pred.png"),
-        "mask_gt": os.path.join(args.save_dir, f"{stem}_mask_gt.png"),
-    }
-
-    tensor_to_pil(x_vis).save(paths["noisy"])
-    tensor_to_pil(y_vis).save(paths["clean"])
-    tensor_to_pil(y_hat).save(paths["denoised"])
-    tensor_to_pil(m_pred).save(paths["mask_pred"])
-    tensor_to_pil(m_gt).save(paths["mask_gt"])
+    grid_path = os.path.join(args.save_dir, f"{stem}_viz.png")
+    grid.save(grid_path)
 
     print(f"Dataset size {info['size']}, visualized index {idx}")
-    for k, v in paths.items():
-        print(f"{k}: {v}")
-    print(
-        f"mask_pred mean/std: {m_pred.mean().item():.4f}/{m_pred.std().item():.4f} | "
-        f"mask_gt mean/std: {m_gt.mean().item():.4f}/{m_gt.std().item():.4f}"
-    )
+    print(f"Saved grid: {grid_path}")
+    if m_pred is not None:
+        mp = m_pred.detach().cpu()
+        print(
+            f"mask_pred mean/std: {mp.mean().item():.4f}/{mp.std().item():.4f} | "
+            f"mask_gt mean/std: {m_gt.mean().item():.4f}/{m_gt.std().item():.4f}"
+        )
+    else:
+        print(f"mask_gt mean/std: {m_gt.mean().item():.4f}/{m_gt.std().item():.4f}")
 
 
 if __name__ == "__main__":

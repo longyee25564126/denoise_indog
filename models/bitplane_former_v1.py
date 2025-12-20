@@ -4,10 +4,10 @@ from torch import nn
 from .tokenizer_cnn import ConvPatchTokenizer
 from .msb_encoder import MSBEncoder
 from .lsb_mask_head import LSBMaskHead
-from .denoise_decoder import DenoiseDecoder
+from .denoise_decoder import DenoiseDecoder, DenoiseDecoderQMSB, DenoiseDecoderStdEncDec
 from datasets.bitplane_utils import expand_bits
 
-#111
+
 class BitPlaneFormerV1(nn.Module):
     def __init__(
         self,
@@ -20,6 +20,7 @@ class BitPlaneFormerV1(nn.Module):
         dropout: float = 0.0,
         lsb_bits: tuple[int, int] | list[int] = (0, 5),
         msb_bits: tuple[int, int] | list[int] = (6, 7),
+        dec_type: str = "fuse_encoder",
     ):
         super().__init__()
         self.patch_size = patch_size
@@ -33,16 +34,41 @@ class BitPlaneFormerV1(nn.Module):
         self.lsb_tokenizer = ConvPatchTokenizer(in_ch=self.lsb_in_ch, embed_dim=embed_dim, patch_size=patch_size)
         self.msb_encoder = MSBEncoder(embed_dim=embed_dim, num_heads=num_heads, depth=msb_depth, mlp_ratio=mlp_ratio, dropout=dropout)
         self.mask_head = LSBMaskHead(embed_dim=embed_dim, hidden_dim=None, dropout=dropout)
-        self.decoder = DenoiseDecoder(
-            embed_dim=embed_dim,
-            num_heads=num_heads,
-            depth=dec_depth,
-            mlp_ratio=mlp_ratio,
-            dropout=dropout,
-            patch_size=patch_size,
-            use_concat_fuse=True,
-            clamp_output=False,
-        )
+        dec_type = dec_type.lower()
+        if dec_type == "fuse_encoder":
+            self.decoder = DenoiseDecoder(
+                embed_dim=embed_dim,
+                num_heads=num_heads,
+                depth=dec_depth,
+                mlp_ratio=mlp_ratio,
+                dropout=dropout,
+                patch_size=patch_size,
+                use_concat_fuse=True,
+                clamp_output=False,
+            )
+        elif dec_type == "decoder_q_msb":
+            self.decoder = DenoiseDecoderQMSB(
+                embed_dim=embed_dim,
+                num_heads=num_heads,
+                depth=dec_depth,
+                mlp_ratio=mlp_ratio,
+                dropout=dropout,
+                patch_size=patch_size,
+                clamp_output=False,
+            )
+        elif dec_type == "std_encdec_msb":
+            self.decoder = DenoiseDecoderStdEncDec(
+                embed_dim=embed_dim,
+                num_heads=num_heads,
+                depth=dec_depth,
+                mlp_ratio=mlp_ratio,
+                dropout=dropout,
+                patch_size=patch_size,
+                clamp_output=False,
+            )
+        else:
+            raise ValueError(f"Unknown dec_type {dec_type}")
+        self.dec_type = dec_type
 
     def forward(
         self,
@@ -64,14 +90,28 @@ class BitPlaneFormerV1(nn.Module):
             x_rgb = x
 
         # Sanity checks on channel counts
-        assert lsb.shape[1] == self.lsb_in_ch, f"Expected LSB channels {self.lsb_in_ch}, got {lsb.shape[1]}"
         assert msb.shape[1] == self.msb_in_ch, f"Expected MSB channels {self.msb_in_ch}, got {msb.shape[1]}"
+        if self.dec_type != "std_encdec_msb":
+            assert lsb is not None and lsb.shape[1] == self.lsb_in_ch, f"Expected LSB channels {self.lsb_in_ch}, got {lsb.shape[1]}"
 
+        # Tokenize
         T_msb0, grid_shape = self.msb_tokenizer(msb)
+        T_msb = self.msb_encoder(T_msb0)
+
+        if self.dec_type == "std_encdec_msb":
+            dec_out = self.decoder(x_rgb, T_msb, None, None, grid_shape)
+            out = {
+                "y_hat": dec_out["y_hat"],
+                "residual_gated": dec_out["residual_gated"],
+                "m_logits": None,
+                "m_hat": None,
+            }
+            return out
+
+        # Other decoders require LSB + mask
         T_lsb0, grid_shape_lsb = self.lsb_tokenizer(lsb)
         assert grid_shape == grid_shape_lsb, "MSB/LSB grids mismatch"
 
-        T_msb = self.msb_encoder(T_msb0)
         mask_out = self.mask_head(T_lsb0, grid_shape)
         m_hat = mask_out["m_hat"]
         m_hat_tok = mask_out["m_hat_tok"]

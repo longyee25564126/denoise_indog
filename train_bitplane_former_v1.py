@@ -12,16 +12,18 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 from torchvision import transforms
+import yaml
 
 from datasets.external_adapter import ExternalPairedBitPlaneDataset
 from models.bitplane_former_v1 import BitPlaneFormerV1
-from datasets.bitplane_utils import to_uint8, expand_bits
+from datasets.bitplane_utils import expand_bits
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train BitPlaneFormerV1 with residual-based mask supervision.")
+    parser.add_argument("--config", type=str, default=None, help="Path to YAML config; CLI args override this.")
     # Data
-    parser.add_argument("--root", type=str, required=True, help="Dataset root.")
+    parser.add_argument("--root", type=str, default=None, help="Dataset root.")
     parser.add_argument("--train-split", type=str, default="train", help="Split name for training.")
     parser.add_argument("--val-split", type=str, default=None, help="Split name for validation (optional).")
     parser.add_argument("--external-module", type=str, default="/home/longyee/datasets/dataset_and_data_loader/data_loader.py", help="Path to data_loader.py defining PairedImageDataset.")
@@ -38,13 +40,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--lambda-mask", type=float, default=0.1, help="Weight for mask regression loss.")
-    parser.add_argument("--mask-T", type=float, default=48.0, help="Temperature for residual mask normalization.")
+    parser.add_argument("--mask-T", type=float, default=48.0, help="Temperature for residual mask normalization (dataset + training).")
     parser.add_argument("--grad-clip", type=float, default=1.0, help="Max grad norm; 0 to disable.")
     parser.add_argument("--amp", action="store_true", help="Use AMP (autocast + GradScaler).")
     parser.add_argument("--save-dir", type=str, default="outputs/train_bitplane_former_v1")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume.")
     parser.add_argument("--log-interval", type=int, default=50, help="Steps between logs.")
     parser.add_argument("--device", type=str, default=None, help='Device (default: "cuda" if available else "cpu").')
+    parser.add_argument("--compute-lpips", action="store_true", help="Compute LPIPS in validation (requires lpips package).")
+    parser.add_argument("--dec-type", type=str, default="fuse_encoder", choices=["fuse_encoder", "decoder_q_msb", "std_encdec_msb"], help="Decoder variant.")
     return parser.parse_args()
 
 
@@ -93,21 +97,43 @@ def build_dataloader(args: argparse.Namespace, split: str, train: bool) -> DataL
     return dl
 
 
-def compute_mask_gt(x: torch.Tensor, y: torch.Tensor, patch_size: int, temperature: float) -> torch.Tensor:
-    with torch.no_grad():
-        x_u8 = to_uint8(x)
-        y_u8 = to_uint8(y)
-        err = (x_u8.to(torch.float32) - y_u8.to(torch.float32)).abs().mean(dim=1, keepdim=True)
-        mask_pix = torch.clamp(err / temperature, 0.0, 1.0)
-        mask_gt = F.avg_pool2d(mask_pix, kernel_size=patch_size, stride=patch_size)
-    return mask_gt
-
-
 def psnr(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> float:
     mse = F.mse_loss(pred, target)
     if mse.item() == 0:
         return float("inf")
     return 20 * math.log10(1.0) - 10 * math.log10(mse.item() + eps)
+
+
+def ssim(pred: torch.Tensor, target: torch.Tensor, data_range: float = 1.0, window_size: int = 11, window_sigma: float = 1.5) -> float:
+    """
+    Compute SSIM for a single image pair. pred/target: (3,H,W) in [0,1].
+    """
+    import math
+
+    # create gaussian window
+    coords = torch.arange(window_size, device=pred.device, dtype=pred.dtype) - window_size // 2
+    g = torch.exp(-(coords ** 2) / (2 * window_sigma ** 2))
+    g = (g / g.sum()).view(1, 1, -1)
+    window_1d = g
+    window_2d = window_1d.transpose(1, 2) @ window_1d
+    window = window_2d.expand(3, 1, window_size, window_size)
+
+    C1 = (0.01 * data_range) ** 2
+    C2 = (0.03 * data_range) ** 2
+
+    mu1 = F.conv2d(pred.unsqueeze(0), window, padding=window_size // 2, groups=3)
+    mu2 = F.conv2d(target.unsqueeze(0), window, padding=window_size // 2, groups=3)
+
+    mu1_sq = mu1.pow(2)
+    mu2_sq = mu2.pow(2)
+    mu1_mu2 = mu1 * mu2
+
+    sigma1_sq = F.conv2d(pred.unsqueeze(0) * pred.unsqueeze(0), window, padding=window_size // 2, groups=3) - mu1_sq
+    sigma2_sq = F.conv2d(target.unsqueeze(0) * target.unsqueeze(0), window, padding=window_size // 2, groups=3) - mu2_sq
+    sigma12 = F.conv2d(pred.unsqueeze(0) * target.unsqueeze(0), window, padding=window_size // 2, groups=3) - mu1_mu2
+
+    ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
+    return ssim_map.mean().item()
 
 
 def save_checkpoint(state: Dict, path: str) -> None:
@@ -128,6 +154,18 @@ def load_checkpoint(path: str, model: nn.Module, optimizer: AdamW, scaler: GradS
 
 def main() -> None:
     args = parse_args()
+    # Load YAML config if provided, then let CLI override
+    if args.config:
+        with open(args.config, "r") as f:
+            cfg = yaml.safe_load(f)
+        if cfg:
+            for k, v in cfg.items():
+                if hasattr(args, k):
+                    setattr(args, k, v)
+
+    if args.root is None:
+        raise ValueError("Please specify --root or set it in the YAML config.")
+
     device_str = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     device = torch.device(device_str)
 
@@ -145,6 +183,7 @@ def main() -> None:
         patch_size=args.patch_size,
         lsb_bits=lsb_bits,
         msb_bits=msb_bits,
+        dec_type=args.dec_type,
     ).to(device)
 
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -168,15 +207,22 @@ def main() -> None:
             y = batch["y"].to(device)
             lsb = batch["lsb"].to(device)
             msb = batch["msb"].to(device)
-
-            mask_gt = compute_mask_gt(x, y, args.patch_size, args.mask_T).to(device)
+            mask_gt = batch.get("mask_gt", None)
+            if mask_gt is not None:
+                mask_gt = mask_gt.to(device)
+                if mask_gt.ndim == 3:
+                    mask_gt = mask_gt.unsqueeze(1)
 
             optimizer.zero_grad(set_to_none=True)
             with autocast(enabled=args.amp):
                 out = model({"x": x, "lsb": lsb, "msb": msb})
                 loss_recon = F.l1_loss(out["y_hat"], y)
-                loss_mask = F.smooth_l1_loss(out["m_hat"], mask_gt)
-                loss = loss_recon + args.lambda_mask * loss_mask
+                if args.dec_type == "std_encdec_msb":
+                    loss_mask = torch.tensor(0.0, device=device)
+                    loss = loss_recon
+                else:
+                    loss_mask = F.smooth_l1_loss(out["m_hat"], mask_gt)
+                    loss = loss_recon + args.lambda_mask * loss_mask
 
             if args.amp:
                 scaler.scale(loss).backward()
@@ -195,14 +241,23 @@ def main() -> None:
 
             if (step + 1) % args.log_interval == 0:
                 with torch.no_grad():
-                    m_hat = out["m_hat"]
-                    log_msg = (
-                        f"Epoch {epoch+1} Step {step+1}/{len(train_loader)} "
-                        f"loss {loss.item():.4f} (recon {loss_recon.item():.4f}, mask {loss_mask.item():.4f}) "
-                        f"mask_gt mean/std {mask_gt.mean().item():.4f}/{mask_gt.std().item():.4f} "
-                        f"m_hat mean/std {m_hat.mean().item():.4f}/{m_hat.std().item():.4f} "
-                        f"lr {optimizer.param_groups[0]['lr']:.6f}"
-                    )
+                    if args.dec_type == "std_encdec_msb":
+                        log_msg = (
+                            f"Epoch {epoch+1} Step {step+1}/{len(train_loader)} "
+                            f"loss {loss.item():.4f} (recon {loss_recon.item():.4f}) "
+                            f"lr {optimizer.param_groups[0]['lr']:.6f}"
+                        )
+                    else:
+                        m_hat = out["m_hat"]
+                        log_msg = (
+                            f"Epoch {epoch+1} Step {step+1}/{len(train_loader)} "
+                            f"loss {loss.item():.4f} (recon {loss_recon.item():.4f}, mask {loss_mask.item():.4f}) "
+                            f"mask_gt mean/std/min/max {mask_gt.mean().item():.4f}/{mask_gt.std().item():.4f}/"
+                            f"{mask_gt.min().item():.4f}/{mask_gt.max().item():.4f} "
+                            f"m_hat mean/std/min/max {m_hat.mean().item():.4f}/{m_hat.std().item():.4f}/"
+                            f"{m_hat.min().item():.4f}/{m_hat.max().item():.4f} "
+                            f"lr {optimizer.param_groups[0]['lr']:.6f}"
+                        )
                     print(log_msg, flush=True)
 
         scheduler.step()
@@ -211,10 +266,22 @@ def main() -> None:
 
         # Validation
         val_psnr = None
+        val_ssim = None
+        val_lpips = None
         if val_loader is not None:
             model.eval()
             psnr_acc = 0.0
+            ssim_acc = 0.0
+            lpips_acc = 0.0
             count = 0
+            lpips_fn = None
+            if args.compute_lpips:
+                try:
+                    import lpips
+                    lpips_fn = lpips.LPIPS(net="vgg").to(device)
+                except Exception as e:
+                    print(f"LPIPS not computed (import failed: {e})")
+                    lpips_fn = None
             with torch.no_grad():
                 for batch in val_loader:
                     x = batch["x"].to(device)
@@ -224,9 +291,22 @@ def main() -> None:
                     out = model({"x": x, "lsb": lsb, "msb": msb})
                     y_hat = out["y_hat"].clamp(0.0, 1.0)
                     psnr_acc += psnr(y_hat, y)
-                    count += 1
+                    ssim_acc += ssim(y_hat[0], y[0]) if y_hat.size(0) == 1 else sum(
+                        ssim(y_hat[b], y[b]) for b in range(y_hat.size(0))
+                    )
+                    if lpips_fn is not None:
+                        y_hat_lp = (y_hat * 2 - 1).clamp(-1, 1)
+                        y_lp = (y * 2 - 1).clamp(-1, 1)
+                        lpips_acc += lpips_fn(y_hat_lp, y_lp).mean().item()
+                    count += y_hat.size(0)
             val_psnr = psnr_acc / max(count, 1)
-            print(f"Val PSNR: {val_psnr:.3f}")
+            val_ssim = ssim_acc / max(count, 1)
+            if lpips_fn is not None:
+                val_lpips = lpips_acc / max(count, 1)
+            msg = f"Val PSNR: {val_psnr:.3f} | SSIM: {val_ssim:.4f}"
+            if val_lpips is not None:
+                msg += f" | LPIPS: {val_lpips:.4f}"
+            print(msg)
 
         # Checkpointing
         ckpt = {
@@ -235,6 +315,9 @@ def main() -> None:
             "scaler": scaler.state_dict() if args.amp else None,
             "epoch": epoch + 1,
             "best_psnr": best_psnr,
+            "val_psnr": val_psnr,
+            "val_ssim": val_ssim,
+            "val_lpips": val_lpips,
             "args": vars(args),
         }
         if val_psnr is not None and val_psnr > best_psnr:

@@ -77,7 +77,7 @@ class ExternalPairedBitPlaneDataset(Dataset):
         split: str = "train",
         fit_to_patch: bool = False,
         use_residual_mask: bool = True,
-        mask_temperature: float = 32.0,
+        mask_temperature: float = 48.0,
         mask_use_quantile: bool = False,
         mask_quantile: float = 0.9,
         lsb_bits: tuple[int, int] | list[int] = (0, 5),

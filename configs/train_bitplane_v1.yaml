@@ -1,0 +1,25 @@
+root: "/home/longyee/datasets/dataset_and_data_loader/dataset final version"
+external_module: "/home/longyee/datasets/dataset_and_data_loader/data_loader.py"
+train_split: "train"
+val_split: "val"
+patch_size: 8
+crop_size: 256
+augment: true
+fit_to_patch: false
+lsb_bits: [0, 1, 2, 3, 4, 5]
+msb_bits: [6, 7]
+dec_type: "decoder_q_msb"  # use decoder_q_msb / fuse_encoder / std_encdec_msb
+epochs: 10
+batch_size: 4
+num_workers: 4
+lr: 1.0e-4
+weight_decay: 0.01
+lambda_mask: 0.4
+mask_T: 48.0
+grad_clip: 1.0
+amp: true
+save_dir: "outputs/train_bitplane_v1_decoder_q_msb"
+resume: null
+log_interval: 50
+compute_lpips: false
+device: null
