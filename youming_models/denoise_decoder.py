@@ -93,9 +93,9 @@ class DenoiseDecoder(nn.Module):
         T_dec = self.decoder(T_in)  # (B, N, D)
 
         R_tok = self.residual_head(T_dec) * self.output_scale  # (B, N, 3*P*P)
-        R_tok_gated = R_tok * m_hat_tok  # broadcast gating
-
-        residual_gated = unpatchify(R_tok_gated, h, w, self.patch_size)  # (B,3,H,W)
+        # R_tok_gated = R_tok * m_hat_tok  # Removed gating to avoid vanishing gradient
+        
+        residual_gated = unpatchify(R_tok, h, w, self.patch_size)  # (B,3,H,W)
 
         y_hat = x_rgb - residual_gated
         if self.clamp_output:

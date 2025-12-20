@@ -15,9 +15,34 @@ if ROOT_DIR not in sys.path:
 from youming_models.external_adapter import ExternalPairedBitPlaneDataset
 from youming_models.bitplane_former_v1 import BitPlaneFormerV1
 from youming_models.metrics import calculate_psnr, calculate_ssim, LPIPS
+from PIL import Image
+
+def tensor_to_pil(img: torch.Tensor) -> Image.Image:
+    """
+    img: float tensor in [0,1], shape (3,H,W) or (1,H,W)
+    """
+    if img.dim() == 3 and img.shape[0] == 3:
+        arr = (img.clamp(0, 1) * 255.0).byte().permute(1, 2, 0).cpu().numpy()
+        return Image.fromarray(arr, mode="RGB")
+    elif img.dim() == 3 and img.shape[0] == 1:
+        arr = (img.clamp(0, 1) * 255.0).byte().squeeze(0).cpu().numpy()
+        return Image.fromarray(arr, mode="L")
+    else:
+        raise ValueError(f"Unexpected tensor shape for image: {tuple(img.shape)}")
 
 
-def train_one_epoch(model, dl, optimizer, device, epoch, args):
+
+class CharbonnierLoss(nn.Module):
+    def __init__(self, eps=1e-3):
+        super(CharbonnierLoss, self).__init__()
+        self.eps = eps
+
+    def forward(self, x, y):
+        diff = x - y
+        loss = torch.sqrt(diff * diff + self.eps * self.eps)
+        return torch.mean(loss)
+
+def train_one_epoch(model, dl, optimizer, device, epoch, args, perceptual_loss_fn):
     model.train()
     total_loss = 0.0
     start_time = time.time()
@@ -41,9 +66,14 @@ def train_one_epoch(model, dl, optimizer, device, epoch, args):
             B, _, h, w = m_hat.shape
             mask_gt = mask_gt.view(B, 1, h, w)
 
-        l1 = nn.L1Loss()(out["y_hat"], y)
+        # l1 = nn.L1Loss()(out["y_hat"], y)
+        char_loss = CharbonnierLoss()(out["y_hat"], y)
         mask_loss = nn.SmoothL1Loss()(m_hat, mask_gt)
-        loss = l1 + args.lambda_mask * mask_loss
+        
+        # Perceptual Loss
+        p_loss = perceptual_loss_fn(out["y_hat"], y)
+        
+        loss = char_loss + args.lambda_mask * mask_loss + args.lambda_perceptual * p_loss
         
         loss.backward()
         optimizer.step()
@@ -51,7 +81,7 @@ def train_one_epoch(model, dl, optimizer, device, epoch, args):
         total_loss += loss.item()
 
         if i % args.log_interval == 0:
-            print(f"Epoch {epoch} [{i}/{len(dl)}] Loss: {loss.item():.4f} (L1: {l1.item():.4f}, Mask: {mask_loss.item():.4f})")
+            print(f"Epoch {epoch} [{i}/{len(dl)}] Loss: {loss.item():.4f} (Char: {char_loss.item():.4f}, Mask: {mask_loss.item():.4f}, Perc: {p_loss.item():.4f})")
 
     avg_loss = total_loss / (i + 1)
     duration = time.time() - start_time
@@ -79,6 +109,22 @@ def validate(model, dl, device, lpips_loss, epoch, save_dir):
             psnr_acc += calculate_psnr(y_hat, y)
             ssim_acc += calculate_ssim(y_hat, y)
             lpips_acc += lpips_loss(y_hat, y).item()
+            
+            # Visualization for the first batch
+            if count == 0:
+                vis_dir = os.path.join(save_dir, "vis", f"epoch_{epoch}")
+                os.makedirs(vis_dir, exist_ok=True)
+                
+                # Save first 4 images from the batch
+                B = x.shape[0]
+                n_vis = min(B, 4)
+                for i in range(n_vis):
+                    stem = f"sample_{i}"
+                    tensor_to_pil(x[i]).save(os.path.join(vis_dir, f"{stem}_noisy.png"))
+                    tensor_to_pil(y[i]).save(os.path.join(vis_dir, f"{stem}_clean.png"))
+                    tensor_to_pil(y_hat[i]).save(os.path.join(vis_dir, f"{stem}_denoised.png"))
+                    tensor_to_pil(out["m_hat"][i]).save(os.path.join(vis_dir, f"{stem}_mask_pred.png"))
+                    
             count += 1
             
     avg_psnr = psnr_acc / max(count, 1)
@@ -111,6 +157,7 @@ def main():
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--save-dir", type=str, default="youming_models/output/checkpoint")
     parser.add_argument("--lambda-mask", type=float, default=0.5)
+    parser.add_argument("--lambda-perceptual", type=float, default=0.1, help="Weight for perceptual loss")
     parser.add_argument("--log-interval", type=int, default=10)
     parser.add_argument("--limit-batches", type=int, default=0, help="Limit batches per epoch for debugging")
     parser.add_argument("--save-interval", type=int, default=10, help="Save checkpoint every N epochs")
@@ -160,8 +207,9 @@ def main():
     )
     val_dl = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
-    # Metrics
-    lpips_loss = LPIPS().to(args.device).eval()
+    # Metrics & Losses
+    lpips_loss_fn = LPIPS().to(args.device).eval() # For validation metrics
+    perceptual_loss_fn = LPIPS().to(args.device).eval() # For training loss (freeze weights)
 
     model = BitPlaneFormerV1(
         patch_size=args.patch_size,
@@ -177,7 +225,7 @@ def main():
 
     print("Starting training...")
     for epoch in range(1, args.epochs + 1):
-        train_one_epoch(model, dl, optimizer, args.device, epoch, args)
+        train_one_epoch(model, dl, optimizer, args.device, epoch, args, perceptual_loss_fn)
         
         # Save checkpoint based on interval
         if epoch % args.save_interval == 0 or epoch == args.epochs:
@@ -186,7 +234,7 @@ def main():
             print(f"Saved checkpoint to {ckpt_path}")
             
             # Run validation
-            validate(model, val_dl, args.device, lpips_loss, epoch, args.save_dir)
+            validate(model, val_dl, args.device, lpips_loss_fn, epoch, args.save_dir)
 
 if __name__ == "__main__":
     main()

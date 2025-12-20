@@ -1,2 +1,0 @@
-Epoch 10 Validation - PSNR: 20.896 | SSIM: 0.5838 | LPIPS: 22.2110
-Epoch 20 Validation - PSNR: 20.897 | SSIM: 0.5839 | LPIPS: 22.2178
