@@ -2,24 +2,27 @@ root: "/home/longyee/datasets/dataset_and_data_loader/dataset final version"
 external_module: "/home/longyee/datasets/dataset_and_data_loader/data_loader.py"
 train_split: "train"
 val_split: "val"
-patch_size: 8
-crop_size: 256
-augment: true
+patch_size: 4
+crop_size: 256            #資料載入時的隨機裁切邊長（像素）
+augment: false
 fit_to_patch: false
 lsb_bits: [0, 1, 2, 3, 4, 5]
 msb_bits: [6, 7]
-dec_type: "decoder_q_msb"  # use decoder_q_msb / fuse_encoder / std_encdec_msb
+dec_type: "std_encdec_msb"  # use decoder_q_msb / fuse_encoder / std_encdec_msb
 epochs: 10
-batch_size: 4
+batch_size: 16
 num_workers: 4
 lr: 1.0e-4
 weight_decay: 0.01
+warmup_epochs: 0.0   # warmup duration in epochs; converted to steps internally
 lambda_mask: 0.4
 mask_T: 48.0
+mask_type: "soft"      # "soft" uses SmoothL1 on continuous mask, "binary" uses BCE on thresholded mask_gt
+mask_thresh: 0.5       # threshold for binary mask_gt
 grad_clip: 1.0
 amp: true
-save_dir: "outputs/train_bitplane_v1_decoder_q_msb"
+save_dir: "outputs/train_bitplane_v1_std_encdec_msb"
 resume: null
 log_interval: 50
-compute_lpips: false
-device: null
+compute_lpips: true
+device: cuda

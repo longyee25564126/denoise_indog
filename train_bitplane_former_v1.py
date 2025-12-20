@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.cuda.amp import GradScaler, autocast
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
 from torch.utils.data import DataLoader
 from torchvision import transforms
 import yaml
@@ -39,8 +39,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)
+    parser.add_argument("--warmup-epochs", type=float, default=0.0, help="Linear warmup duration in epochs before cosine decay (converted to steps).")
     parser.add_argument("--lambda-mask", type=float, default=0.1, help="Weight for mask regression loss.")
     parser.add_argument("--mask-T", type=float, default=48.0, help="Temperature for residual mask normalization (dataset + training).")
+    parser.add_argument("--mask-type", type=str, default="soft", choices=["soft", "binary"], help="Mask supervision type.")
+    parser.add_argument("--mask-thresh", type=float, default=0.5, help="Threshold when using binary mask supervision.")
     parser.add_argument("--grad-clip", type=float, default=1.0, help="Max grad norm; 0 to disable.")
     parser.add_argument("--amp", action="store_true", help="Use AMP (autocast + GradScaler).")
     parser.add_argument("--save-dir", type=str, default="outputs/train_bitplane_former_v1")
@@ -97,11 +100,21 @@ def build_dataloader(args: argparse.Namespace, split: str, train: bool) -> DataL
     return dl
 
 
-def psnr(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> float:
-    mse = F.mse_loss(pred, target)
-    if mse.item() == 0:
-        return float("inf")
-    return 20 * math.log10(1.0) - 10 * math.log10(mse.item() + eps)
+def psnr(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """
+    Compute per-sample PSNR. pred/target: (B,3,H,W) or (3,H,W) in [0,1].
+    Returns: tensor of shape (B,) or scalar if no batch dim.
+    """
+    if pred.dim() == 3:
+        mse = F.mse_loss(pred, target)
+        if mse.item() == 0:
+            return torch.tensor(float("inf"))
+        return torch.tensor(20 * math.log10(1.0) - 10 * math.log10(mse.item() + eps))
+
+    mse = F.mse_loss(pred, target, reduction="none")
+    mse = mse.view(mse.shape[0], -1).mean(dim=1)  # (B,)
+    psnr_vals = 20 * torch.log10(torch.tensor(1.0, device=pred.device)) - 10 * torch.log10(mse + eps)
+    return psnr_vals
 
 
 def ssim(pred: torch.Tensor, target: torch.Tensor, data_range: float = 1.0, window_size: int = 11, window_sigma: float = 1.5) -> float:
@@ -188,16 +201,44 @@ def main() -> None:
 
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scaler = GradScaler(enabled=args.amp)
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
+
+    total_steps = args.epochs * len(train_loader)
+    warmup_steps = int(math.ceil(max(0.0, args.warmup_epochs) * len(train_loader)))
+
+    def lr_lambda(step: int) -> float:
+        if total_steps <= 0:
+            return 1.0
+        if step < warmup_steps and warmup_steps > 0:
+            return float(step) / float(max(1, warmup_steps))
+        progress = (step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+        # cosine decay from 1 to 0
+        return 0.5 * (1.0 + math.cos(math.pi * min(1.0, max(0.0, progress))))
+
+    scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
 
     start_epoch = 0
     best_psnr = -1e9
     if args.resume:
         start_epoch, best_psnr = load_checkpoint(args.resume, model, optimizer, scaler)
-        print(f"Resumed from {args.resume} at epoch {start_epoch}, best_psnr={best_psnr:.3f}")
+        log_write(f"Resumed from {args.resume} at epoch {start_epoch}, best_psnr={best_psnr:.3f}")
 
     os.makedirs(args.save_dir, exist_ok=True)
+    log_path = os.path.join(args.save_dir, "train.log")
+    # Truncate existing log on each run
+    with open(log_path, "w") as _f:
+        pass
+    def log_write(msg: str):
+        print(msg)
+        with open(log_path, "a") as f:
+            f.write(msg + "\n")
 
+    # Save args to log at start
+    log_write("==== Training Configuration ====")
+    for k, v in sorted(vars(args).items()):
+        log_write(f"{k}: {v}")
+    log_write("================================")
+
+    global_step = 0
     for epoch in range(start_epoch, args.epochs):
         model.train()
         epoch_loss = 0.0
@@ -221,7 +262,11 @@ def main() -> None:
                     loss_mask = torch.tensor(0.0, device=device)
                     loss = loss_recon
                 else:
-                    loss_mask = F.smooth_l1_loss(out["m_hat"], mask_gt)
+                    if args.mask_type == "binary":
+                        mask_gt_bin = (mask_gt >= args.mask_thresh).float()
+                        loss_mask = F.binary_cross_entropy_with_logits(out["m_logits"], mask_gt_bin)
+                    else:
+                        loss_mask = F.smooth_l1_loss(out["m_hat"], mask_gt)
                     loss = loss_recon + args.lambda_mask * loss_mask
 
             if args.amp:
@@ -236,6 +281,8 @@ def main() -> None:
                 if args.grad_clip and args.grad_clip > 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
                 optimizer.step()
+            scheduler.step()
+            global_step += 1
 
             epoch_loss += loss.item()
 
@@ -258,11 +305,10 @@ def main() -> None:
                             f"{m_hat.min().item():.4f}/{m_hat.max().item():.4f} "
                             f"lr {optimizer.param_groups[0]['lr']:.6f}"
                         )
-                    print(log_msg, flush=True)
+                    log_write(log_msg)
 
-        scheduler.step()
         epoch_time = time.time() - t0
-        print(f"Epoch {epoch+1} done in {epoch_time:.1f}s, avg loss {epoch_loss/len(train_loader):.4f}")
+        log_write(f"Epoch {epoch+1} done in {epoch_time:.1f}s, avg loss {epoch_loss/len(train_loader):.4f}")
 
         # Validation
         val_psnr = None
@@ -290,7 +336,13 @@ def main() -> None:
                     msb = batch["msb"].to(device)
                     out = model({"x": x, "lsb": lsb, "msb": msb})
                     y_hat = out["y_hat"].clamp(0.0, 1.0)
-                    psnr_acc += psnr(y_hat, y)
+                    psnr_vals = psnr(y_hat, y)
+                    if psnr_vals.dim() == 0:
+                        psnr_acc += psnr_vals.item()
+                        count += 1
+                    else:
+                        psnr_acc += psnr_vals.sum().item()
+                        count += psnr_vals.numel()
                     ssim_acc += ssim(y_hat[0], y[0]) if y_hat.size(0) == 1 else sum(
                         ssim(y_hat[b], y[b]) for b in range(y_hat.size(0))
                     )
@@ -298,7 +350,6 @@ def main() -> None:
                         y_hat_lp = (y_hat * 2 - 1).clamp(-1, 1)
                         y_lp = (y * 2 - 1).clamp(-1, 1)
                         lpips_acc += lpips_fn(y_hat_lp, y_lp).mean().item()
-                    count += y_hat.size(0)
             val_psnr = psnr_acc / max(count, 1)
             val_ssim = ssim_acc / max(count, 1)
             if lpips_fn is not None:
@@ -306,7 +357,7 @@ def main() -> None:
             msg = f"Val PSNR: {val_psnr:.3f} | SSIM: {val_ssim:.4f}"
             if val_lpips is not None:
                 msg += f" | LPIPS: {val_lpips:.4f}"
-            print(msg)
+            log_write(msg)
 
         # Checkpointing
         ckpt = {
@@ -324,7 +375,7 @@ def main() -> None:
             best_psnr = val_psnr
             ckpt["best_psnr"] = best_psnr
             save_checkpoint(ckpt, os.path.join(args.save_dir, "best.pth"))
-            print(f"Saved new best checkpoint with PSNR {best_psnr:.3f}")
+            log_write(f"Saved new best checkpoint with PSNR {best_psnr:.3f}")
         ckpt["best_psnr"] = best_psnr
         save_checkpoint(ckpt, os.path.join(args.save_dir, "last.pth"))
 
