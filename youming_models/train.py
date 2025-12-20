@@ -14,7 +14,9 @@ if ROOT_DIR not in sys.path:
 
 from youming_models.external_adapter import ExternalPairedBitPlaneDataset
 from youming_models.bitplane_former_v1 import BitPlaneFormerV1
+from youming_models.unet_model import BitPlaneUNet
 from youming_models.metrics import calculate_psnr, calculate_ssim, LPIPS
+from datasets.bitplane_utils import residual_soft_mask
 from PIL import Image
 
 def tensor_to_pil(img: torch.Tensor) -> Image.Image:
@@ -61,10 +63,17 @@ def train_one_epoch(model, dl, optimizer, device, epoch, args, perceptual_loss_f
         out = model(x, lsb, msb)
 
         m_hat = out["m_hat"]
-        # Ensure mask_gt shape matches m_hat
-        if mask_gt.ndim != m_hat.ndim:
-            B, _, h, w = m_hat.shape
-            mask_gt = mask_gt.view(B, 1, h, w)
+        
+        # Re-compute mask_gt with patch_size=1 for U-Net (pixel-level mask)
+        # mask_gt from dataloader is patch-level (e.g. 32x32), but U-Net outputs 256x256
+        mask_gt = residual_soft_mask(
+            x, 
+            y, 
+            patch_size=1, 
+            temperature=32.0, # Default from dataset
+            use_quantile=False, 
+            quantile=0.9
+        ).to(device)
 
         # l1 = nn.L1Loss()(out["y_hat"], y)
         char_loss = CharbonnierLoss()(out["y_hat"], y)
@@ -81,7 +90,9 @@ def train_one_epoch(model, dl, optimizer, device, epoch, args, perceptual_loss_f
         total_loss += loss.item()
 
         if i % args.log_interval == 0:
-            print(f"Epoch {epoch} [{i}/{len(dl)}] Loss: {loss.item():.4f} (Char: {char_loss.item():.4f}, Mask: {mask_loss.item():.4f}, Perc: {p_loss.item():.4f})")
+            res_mag = out["residual_gated"].abs().mean().item()
+            mask_gt_mean = mask_gt.mean().item()
+            print(f"Epoch {epoch} [{i}/{len(dl)}] Loss: {loss.item():.4f} (Char: {char_loss.item():.4f}, Mask: {mask_loss.item():.4f}, Perc: {p_loss.item():.4f}, Res: {res_mag:.4f}, MaskGT: {mask_gt_mean:.4f})")
 
     avg_loss = total_loss / (i + 1)
     duration = time.time() - start_time
@@ -110,21 +121,39 @@ def validate(model, dl, device, lpips_loss, epoch, save_dir):
             ssim_acc += calculate_ssim(y_hat, y)
             lpips_acc += lpips_loss(y_hat, y).item()
             
-            # Visualization for the first batch
-            if count == 0:
-                vis_dir = os.path.join(save_dir, "vis", f"epoch_{epoch}")
-                os.makedirs(vis_dir, exist_ok=True)
+            # Visualization for specific files
+            if "path_noisy" in batch:
+                paths = batch["path_noisy"]
+                # Debug: Print first path of first batch to verify
+                if count == 0:
+                    print(f"DEBUG: Validation paths sample: {paths[:2]}")
                 
-                # Save first 4 images from the batch
-                B = x.shape[0]
-                n_vis = min(B, 4)
-                for i in range(n_vis):
-                    stem = f"sample_{i}"
-                    tensor_to_pil(x[i]).save(os.path.join(vis_dir, f"{stem}_noisy.png"))
-                    tensor_to_pil(y[i]).save(os.path.join(vis_dir, f"{stem}_clean.png"))
-                    tensor_to_pil(y_hat[i]).save(os.path.join(vis_dir, f"{stem}_denoised.png"))
-                    tensor_to_pil(out["m_hat"][i]).save(os.path.join(vis_dir, f"{stem}_mask_pred.png"))
-                    
+                # Define target substrings to match
+                targets = [
+                    "bathroom/000096",
+                    "operating_room/000017",
+                    "warehouse/000094",
+                    "pantry/000115",
+                    "office/000048"
+                ]
+                
+                vis_dir = os.path.join(save_dir, "vis", f"epoch_{epoch}")
+                
+                for i, path in enumerate(paths):
+                    if path is None: continue
+                    # Check if any target substring is in the path
+                    for t in targets:
+                        if t in path:
+                            os.makedirs(vis_dir, exist_ok=True)
+                            # Create a filename safe version of the path or use the target name
+                            safe_name = t.replace("/", "_")
+                            
+                            tensor_to_pil(x[i]).save(os.path.join(vis_dir, f"{safe_name}_noisy.png"))
+                            tensor_to_pil(y[i]).save(os.path.join(vis_dir, f"{safe_name}_clean.png"))
+                            tensor_to_pil(y_hat[i]).save(os.path.join(vis_dir, f"{safe_name}_denoised.png"))
+                            tensor_to_pil(out["m_hat"][i]).save(os.path.join(vis_dir, f"{safe_name}_mask_pred.png"))
+                            break # Found a match, move to next image in batch
+
             count += 1
             
     avg_psnr = psnr_acc / max(count, 1)
@@ -211,15 +240,18 @@ def main():
     lpips_loss_fn = LPIPS().to(args.device).eval() # For validation metrics
     perceptual_loss_fn = LPIPS().to(args.device).eval() # For training loss (freeze weights)
 
-    model = BitPlaneFormerV1(
-        patch_size=args.patch_size,
-        embed_dim=256,
-        num_heads=8,
-        msb_depth=6,
-        dec_depth=6,
-        mlp_ratio=4.0,
-        dropout=0.0,
-    ).to(args.device)
+    # model = BitPlaneFormerV1(
+    #     patch_size=args.patch_size,
+    #     embed_dim=256,
+    #     num_heads=8,
+    #     msb_depth=6,
+    #     dec_depth=6,
+    #     mlp_ratio=4.0,
+    #     dropout=0.0,
+    # ).to(args.device)
+    
+    # Use U-Net
+    model = BitPlaneUNet(n_channels=27, n_classes=3).to(args.device)
     
     optimizer = optim.AdamW(model.parameters(), lr=args.lr)
 

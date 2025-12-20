@@ -6,12 +6,12 @@ external_module: "/home/youming/dataset_and_data_loader/data_loader.py"
 
 # Training hyperparameters
 epochs: 100
-batch_size: 64
-lr: 0.00001
+batch_size: 8
+lr: 0.0001
 patch_size: 8
 crop_size: 256
-lambda_mask: 0.5
-lambda_perceptual: 0.1
+lambda_mask: 1.0
+lambda_perceptual: 0.01
 # Output directories
 save_dir: "youming_models/output/checkpoint"
 save_interval: 10  # Save every N epochs

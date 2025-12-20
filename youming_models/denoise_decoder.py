@@ -58,7 +58,7 @@ class DenoiseDecoder(nn.Module):
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
         self.residual_head = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim),
+            nn.Linear(embed_dim + 1, embed_dim),
             nn.GELU(),
             nn.Linear(embed_dim, 3 * patch_size * patch_size),
         )
@@ -92,7 +92,11 @@ class DenoiseDecoder(nn.Module):
 
         T_dec = self.decoder(T_in)  # (B, N, D)
 
-        R_tok = self.residual_head(T_dec) * self.output_scale  # (B, N, 3*P*P)
+        # Concatenate mask token with decoder features
+        # T_dec: (B, N, D), m_hat_tok: (B, N, 1)
+        T_dec_cat = torch.cat([T_dec, m_hat_tok], dim=-1)  # (B, N, D+1)
+
+        R_tok = self.residual_head(T_dec_cat) * self.output_scale  # (B, N, 3*P*P)
         # R_tok_gated = R_tok * m_hat_tok  # Removed gating to avoid vanishing gradient
         
         residual_gated = unpatchify(R_tok, h, w, self.patch_size)  # (B,3,H,W)
