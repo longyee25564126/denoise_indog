@@ -81,6 +81,7 @@ def main() -> None:
     parser.add_argument("--external-module", type=str, default="/home/longyee/datasets/dataset_and_data_loader/data_loader.py", help="Path to data_loader.py.")
     parser.add_argument("--split", type=str, default="val", help="Dataset split to sample from.")
     parser.add_argument("--index", type=int, default=-1, help="Sample index to visualize; -1 for random.")
+    parser.add_argument("--name", type=str, default=None, help="Substring to pick sample by filename (noisy or clean).")
     parser.add_argument("--patch-size", type=int, default=8)
     parser.add_argument("--crop-size", type=int, default=None)
     parser.add_argument("--augment", action="store_true", help="Enable augment for loading (usually off for eval).")
@@ -101,7 +102,17 @@ def main() -> None:
 
     ds, info = load_dataset(args, train=False)
     idx = args.index
-    if idx < 0:
+    if args.name is not None:
+        matches = []
+        target = args.name.lower()
+        for i, (noisy_path, clean_path, _) in enumerate(ds.base_dataset.samples):
+            if target in noisy_path.lower() or target in clean_path.lower():
+                matches.append(i)
+        if not matches:
+            raise ValueError(f"No sample filename contains '{args.name}' in split {args.split}")
+        idx = matches[0]
+        print(f"Found name match '{args.name}' at index {idx} (first match of {len(matches)})")
+    elif idx < 0:
         idx = random.randrange(len(ds))
     else:
         idx = max(0, min(idx, len(ds) - 1))
