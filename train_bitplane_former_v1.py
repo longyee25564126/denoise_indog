@@ -16,6 +16,7 @@ from torchvision import transforms
 from datasets.external_adapter import ExternalPairedBitPlaneDataset
 from models.bitplane_former_v1 import BitPlaneFormerV1
 from datasets.bitplane_utils import to_uint8, expand_bits
+from metrics import LPIPS, ssim
 
 
 def parse_args() -> argparse.Namespace:
@@ -151,6 +152,9 @@ def main() -> None:
     scaler = GradScaler(enabled=args.amp)
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
 
+    # Metrics
+    lpips_loss = LPIPS().to(device).eval()
+
     start_epoch = 0
     best_psnr = -1e9
     if args.resume:
@@ -214,6 +218,8 @@ def main() -> None:
         if val_loader is not None:
             model.eval()
             psnr_acc = 0.0
+            ssim_acc = 0.0
+            lpips_acc = 0.0
             count = 0
             with torch.no_grad():
                 for batch in val_loader:
@@ -223,10 +229,17 @@ def main() -> None:
                     msb = batch["msb"].to(device)
                     out = model({"x": x, "lsb": lsb, "msb": msb})
                     y_hat = out["y_hat"].clamp(0.0, 1.0)
+                    
                     psnr_acc += psnr(y_hat, y)
+                    ssim_acc += ssim(y_hat, y)
+                    lpips_acc += lpips_loss(y_hat, y).item()
                     count += 1
+            
             val_psnr = psnr_acc / max(count, 1)
-            print(f"Val PSNR: {val_psnr:.3f}")
+            val_ssim = ssim_acc / max(count, 1)
+            val_lpips = lpips_acc / max(count, 1)
+            
+            print(f"Val PSNR: {val_psnr:.3f} | SSIM: {val_ssim:.4f} | LPIPS: {val_lpips:.4f}")
 
         # Checkpointing
         ckpt = {
