@@ -80,6 +80,8 @@ class ExternalPairedBitPlaneDataset(Dataset):
         mask_temperature: float = 32.0,
         mask_use_quantile: bool = False,
         mask_quantile: float = 0.9,
+        lsb_bits: tuple[int, int] | list[int] = (0, 5),
+        msb_bits: tuple[int, int] | list[int] = (6, 7),
     ):
         super().__init__()
         self.patch_size = patch_size
@@ -92,6 +94,8 @@ class ExternalPairedBitPlaneDataset(Dataset):
         self.mask_temperature = mask_temperature
         self.mask_use_quantile = mask_use_quantile
         self.mask_quantile = mask_quantile
+        self.lsb_bits = lsb_bits
+        self.msb_bits = msb_bits
 
         if self.crop_size is not None and (self.crop_size % self.patch_size != 0):
             raise ValueError("crop_size must be divisible by patch_size")
@@ -137,7 +141,7 @@ class ExternalPairedBitPlaneDataset(Dataset):
         noisy_u8 = to_uint8(noisy)
         clean_u8 = to_uint8(clean)
 
-        lsb, msb = make_lsb_msb(noisy_u8)
+        lsb, msb = make_lsb_msb(noisy_u8, lsb_bits=self.lsb_bits, msb_bits=self.msb_bits)
         if self.use_residual_mask:
             mask_gt = residual_soft_mask(
                 noisy,

@@ -1,3 +1,5 @@
+from typing import Iterable, Sequence
+
 import torch
 import torch.nn.functional as F
 
@@ -7,6 +9,22 @@ def to_uint8(img_float01: torch.Tensor) -> torch.Tensor:
     Convert a float image in [0, 1] with shape (3, H, W) to uint8.
     """
     return torch.clamp(torch.round(img_float01 * 255.0), 0, 255).to(torch.uint8)
+
+
+def expand_bits(bits: Sequence[int] | tuple[int, int]) -> list[int]:
+    """
+    Normalize bit specification into a sorted unique list.
+    Accepts:
+        - iterable of ints
+        - tuple (start, end) inclusive
+    """
+    if isinstance(bits, tuple) and len(bits) == 2:
+        start, end = bits
+        bit_list = list(range(start, end + 1))
+    else:
+        bit_list = list(bits)
+    bit_list = sorted(set(int(b) for b in bit_list))
+    return bit_list
 
 
 def extract_bit_planes(u8_img: torch.Tensor, bits: list[int]) -> torch.Tensor:
@@ -26,16 +44,27 @@ def extract_bit_planes(u8_img: torch.Tensor, bits: list[int]) -> torch.Tensor:
     return stacked.view(nbits * c, h, w).to(torch.float32)
 
 
-def make_lsb_msb(u8_img: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def make_lsb_msb(
+    u8_img: torch.Tensor,
+    lsb_bits: Sequence[int] | tuple[int, int] = (0, 5),
+    msb_bits: Sequence[int] | tuple[int, int] = (6, 7),
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Build LSB and MSB stacks from a uint8 image.
+    Build LSB and MSB stacks from a uint8 image, with configurable bit ranges.
+
+    Args:
+        u8_img: uint8 tensor (3,H,W)
+        lsb_bits: iterable of bit indices or (start,end) inclusive (default 0-5)
+        msb_bits: iterable of bit indices or (start,end) inclusive (default 6-7)
 
     Returns:
-        lsb: bits [0,1,2,3], shape (12, H, W)
-        msb: bits [4,5,6,7], shape (12, H, W)
+        lsb: shape (3 * n_lsb_bits, H, W)
+        msb: shape (3 * n_msb_bits, H, W)
     """
-    lsb = extract_bit_planes(u8_img, [0, 1, 2, 3])
-    msb = extract_bit_planes(u8_img, [4, 5, 6, 7])
+    lsb_list = expand_bits(lsb_bits)
+    msb_list = expand_bits(msb_bits)
+    lsb = extract_bit_planes(u8_img, lsb_list)
+    msb = extract_bit_planes(u8_img, msb_list)
     return lsb, msb
 
 
