@@ -7,6 +7,7 @@ def unpatchify(patches: torch.Tensor, h: int, w: int, patch_size: int) -> torch.
     Convert patch tokens of shape (B, N, 3*P*P) back to an image (B, 3, H, W)
     where N = h*w, H = h*P, W = w*P.
     """
+    #111
     B, N, PP = patches.shape
     P = patch_size
     assert PP == 3 * P * P, f"Expected channel size 3*P*P, got {PP}"
