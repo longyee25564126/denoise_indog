@@ -45,6 +45,11 @@ def build_dataset(args):
             augment=args.augment,
             return_mask_flat=False,
             split=args.split,
+            fit_to_patch=args.use_fit_to_patch,
+            use_residual_mask=True,
+            mask_temperature=args.mask_temperature,
+            mask_use_quantile=args.mask_use_quantile,
+            mask_quantile=args.mask_quantile,
         )
     else:
         data_root = args.root
@@ -60,6 +65,10 @@ def build_dataset(args):
             augment=args.augment,
             strict_pairing=True,
             return_mask_flat=False,
+            use_residual_mask=True,
+            mask_temperature=args.mask_temperature,
+            mask_use_quantile=args.mask_use_quantile,
+            mask_quantile=args.mask_quantile,
         )
     return ds, tmp_root
 
@@ -82,6 +91,11 @@ def main() -> None:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--augment", action="store_true")
     parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--mask-temperature", type=float, default=32.0, help="Temperature for residual-based mask normalization.")
+    parser.add_argument("--mask-use-quantile", action="store_true", help="Use per-image quantile to scale residual mask.")
+    parser.add_argument("--mask-quantile", type=float, default=0.9, help="Quantile value when using quantile-based scaling.")
+    parser.add_argument("--lambda-mask", type=float, default=0.5, help="Weight for mask regression loss.")
+    parser.add_argument("--use-fit-to-patch", action="store_true", help="Center-crop to nearest patch-aligned size if needed (external loader).")
     args = parser.parse_args()
 
     ds, tmp_root = build_dataset(args)
@@ -114,21 +128,22 @@ def main() -> None:
 
         out = model(x, lsb, msb)
 
-        m_logits = out["m_logits"]
-        # Ensure mask_gt shape matches m_logits
-        if mask_gt.ndim != m_logits.ndim:
-            B, _, h, w = m_logits.shape
+        m_hat = out["m_hat"]
+        # Ensure mask_gt shape matches m_hat
+        if mask_gt.ndim != m_hat.ndim:
+            B, _, h, w = m_hat.shape
             mask_gt = mask_gt.view(B, 1, h, w)
 
         l1 = nn.L1Loss()(out["y_hat"], y)
-        bce = nn.BCEWithLogitsLoss()(m_logits, mask_gt)
-        loss = l1 + 0.1 * bce
+        mask_loss = nn.SmoothL1Loss()(m_hat, mask_gt)
+        loss = l1 + args.lambda_mask * mask_loss
         loss.backward()
 
         print(f"x: {tuple(x.shape)}, y_hat: {tuple(out['y_hat'].shape)}")
         print(f"residual_gated: {tuple(out['residual_gated'].shape)}")
-        print(f"m_logits: {tuple(m_logits.shape)}, mask_gt: {tuple(mask_gt.shape)}")
-        print(f"L1: {l1.item():.4f}, BCE: {bce.item():.4f}, total: {loss.item():.4f}")
+        print(f"m_hat: {tuple(m_hat.shape)}, mask_gt: {tuple(mask_gt.shape)}")
+        print(f"L1: {l1.item():.4f}, mask_loss: {mask_loss.item():.4f}, total: {loss.item():.4f}")
+        print(f"mask_gt mean/std: {mask_gt.mean().item():.4f}/{mask_gt.std().item():.4f} | m_hat mean/std: {m_hat.mean().item():.4f}/{m_hat.std().item():.4f}")
     finally:
         if tmp_root is not None:
             shutil.rmtree(tmp_root)

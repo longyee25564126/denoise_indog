@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 
 
 def to_uint8(img_float01: torch.Tensor) -> torch.Tensor:
@@ -72,3 +73,50 @@ def pool_to_patch_mask(m_gt_pix: torch.Tensor, patch_size: int) -> torch.Tensor:
 
     pooled = F.avg_pool2d(m_gt_pix.unsqueeze(0), kernel_size=patch_size, stride=patch_size)
     return pooled.squeeze(0)
+
+
+def residual_soft_mask(
+    x_float01: torch.Tensor,
+    y_float01: torch.Tensor,
+    patch_size: int,
+    temperature: float = 32.0,
+    use_quantile: bool = False,
+    quantile: float = 0.9,
+) -> torch.Tensor:
+    """
+    Build a soft mask from absolute RGB residuals (uint8) pooled to patch grid.
+
+    Args:
+        x_float01: noisy image float [0,1], shape (3,H,W) or (B,3,H,W)
+        y_float01: clean image float [0,1], shape (3,H,W) or (B,3,H,W)
+        patch_size: pooling kernel/stride
+        temperature: fixed scale for normalization when use_quantile=False
+        use_quantile: if True, use per-image quantile of residual as scale
+        quantile: quantile value in (0,1) when use_quantile=True
+
+    Returns:
+        mask_gt: float tensor shape (1,h,w) or (B,1,h,w) depending on input dims
+    """
+    added_batch = False
+    if x_float01.ndim == 3:
+        x_float01 = x_float01.unsqueeze(0)
+        y_float01 = y_float01.unsqueeze(0)
+        added_batch = True
+
+    x_u8 = to_uint8(x_float01)
+    y_u8 = to_uint8(y_float01)
+    err = (x_u8.to(torch.float32) - y_u8.to(torch.float32)).abs().mean(dim=1, keepdim=True)  # (B,1,H,W)
+
+    if use_quantile:
+        # per-image quantile as scale, avoid zeros
+        q = torch.quantile(err.view(err.shape[0], -1), quantile, dim=1, keepdim=True)
+        scale = torch.clamp(q, min=1.0).view(-1, 1, 1, 1)
+    else:
+        scale = torch.tensor(temperature, device=err.device, dtype=err.dtype)
+
+    mask_pix = torch.clamp(err / scale, 0.0, 1.0)
+    mask_gt = F.avg_pool2d(mask_pix, kernel_size=patch_size, stride=patch_size)
+
+    if added_batch:
+        mask_gt = mask_gt.squeeze(0)
+    return mask_gt

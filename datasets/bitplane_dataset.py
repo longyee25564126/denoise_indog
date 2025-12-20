@@ -1,13 +1,19 @@
 import os
 import random
 from typing import List, Optional, Tuple
-#幹嘛要加這行
+
 import numpy as np
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-from .bitplane_utils import lsb_xor_mask, make_lsb_msb, pool_to_patch_mask, to_uint8
+from .bitplane_utils import (
+    lsb_xor_mask,
+    make_lsb_msb,
+    pool_to_patch_mask,
+    to_uint8,
+    residual_soft_mask,
+)
 
 
 def _load_image_as_tensor(path: str) -> torch.Tensor:
@@ -18,7 +24,6 @@ def _load_image_as_tensor(path: str) -> torch.Tensor:
         img = img.convert("RGB")
         arr = np.array(img, dtype=np.uint8)  # H x W x 3
     tensor = torch.from_numpy(arr).permute(2, 0, 1).to(torch.float32) / 255.0
-    print("幹嘛要加這行")
     return tensor
 
 
@@ -66,6 +71,10 @@ class BitPlanePairDataset(Dataset):
         augment: bool = False,
         strict_pairing: bool = True,
         return_mask_flat: bool = False,
+        use_residual_mask: bool = True,
+        mask_temperature: float = 32.0,
+        mask_use_quantile: bool = False,
+        mask_quantile: float = 0.9,
     ):
         super().__init__()
         self.root = root
@@ -75,6 +84,10 @@ class BitPlanePairDataset(Dataset):
         self.augment = augment
         self.strict_pairing = strict_pairing
         self.return_mask_flat = return_mask_flat
+        self.use_residual_mask = use_residual_mask
+        self.mask_temperature = mask_temperature
+        self.mask_use_quantile = mask_use_quantile
+        self.mask_quantile = mask_quantile
 
         if self.crop_size is not None and (self.crop_size % self.patch_size != 0):
             raise ValueError("crop_size must be divisible by patch_size")
@@ -152,8 +165,18 @@ class BitPlanePairDataset(Dataset):
         y_u8 = to_uint8(y)
 
         lsb, msb = make_lsb_msb(x_u8)
-        mask_pix = lsb_xor_mask(x_u8, y_u8)
-        mask_gt = pool_to_patch_mask(mask_pix, self.patch_size)
+        if self.use_residual_mask:
+            mask_gt = residual_soft_mask(
+                x,
+                y,
+                patch_size=self.patch_size,
+                temperature=self.mask_temperature,
+                use_quantile=self.mask_use_quantile,
+                quantile=self.mask_quantile,
+            )
+        else:
+            mask_pix = lsb_xor_mask(x_u8, y_u8)
+            mask_gt = pool_to_patch_mask(mask_pix, self.patch_size)
         if self.return_mask_flat:
             mask_gt = mask_gt.flatten().unsqueeze(1)  # (h*w, 1); grid shape is (1, h, w) by default
 

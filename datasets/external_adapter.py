@@ -11,7 +11,13 @@ from typing import Optional
 import torch
 from torch.utils.data import Dataset
 
-from .bitplane_utils import lsb_xor_mask, make_lsb_msb, pool_to_patch_mask, to_uint8
+from .bitplane_utils import (
+    lsb_xor_mask,
+    make_lsb_msb,
+    pool_to_patch_mask,
+    to_uint8,
+    residual_soft_mask,
+)
 
 
 def _load_module(module_path: str) -> ModuleType:
@@ -61,13 +67,19 @@ class ExternalPairedBitPlaneDataset(Dataset):
 
     def __init__(
         self,
-        module_path: str,
-        root_dir: str,
+        module_path: Optional[str] = None,
+        root_dir: Optional[str] = None,
+        base_dataset: Optional[Dataset] = None,
         patch_size: int = 8,
         crop_size: Optional[int] = None,
         augment: bool = False,
         return_mask_flat: bool = False,
         split: str = "train",
+        fit_to_patch: bool = False,
+        use_residual_mask: bool = True,
+        mask_temperature: float = 32.0,
+        mask_use_quantile: bool = False,
+        mask_quantile: float = 0.9,
     ):
         super().__init__()
         self.patch_size = patch_size
@@ -75,19 +87,29 @@ class ExternalPairedBitPlaneDataset(Dataset):
         self.augment = augment
         self.return_mask_flat = return_mask_flat
         self.split = split
+        self.fit_to_patch = fit_to_patch
+        self.use_residual_mask = use_residual_mask
+        self.mask_temperature = mask_temperature
+        self.mask_use_quantile = mask_use_quantile
+        self.mask_quantile = mask_quantile
 
         if self.crop_size is not None and (self.crop_size % self.patch_size != 0):
             raise ValueError("crop_size must be divisible by patch_size")
 
-        module = _load_module(module_path)
-        if not hasattr(module, "PairedImageDataset"):
-            raise AttributeError(f"Module {module_path} has no PairedImageDataset")
-        PairedImageDataset = getattr(module, "PairedImageDataset")
-        try:
-            self.base_dataset = PairedImageDataset(root_dir=root_dir, split=split, transform=None)
-        except TypeError:
-            # Fallback if external class does not support split
-            self.base_dataset = PairedImageDataset(root_dir=root_dir, transform=None)
+        if base_dataset is not None:
+            self.base_dataset = base_dataset
+        else:
+            if module_path is None or root_dir is None:
+                raise ValueError("Either base_dataset must be provided or module_path/root_dir must be specified")
+            module = _load_module(module_path)
+            if not hasattr(module, "PairedImageDataset"):
+                raise AttributeError(f"Module {module_path} has no PairedImageDataset")
+            PairedImageDataset = getattr(module, "PairedImageDataset")
+            try:
+                self.base_dataset = PairedImageDataset(root_dir=root_dir, split=split, transform=None)
+            except TypeError:
+                # Fallback if external class does not support split
+                self.base_dataset = PairedImageDataset(root_dir=root_dir, transform=None)
 
     def __len__(self) -> int:
         return len(self.base_dataset)
@@ -104,6 +126,10 @@ class ExternalPairedBitPlaneDataset(Dataset):
         if self.augment:
             noisy, clean = _augment_pair(noisy, clean)
 
+        if self.fit_to_patch:
+            noisy = self._fit_to_patch(noisy)
+            clean = self._fit_to_patch(clean)
+
         _, H, W = noisy.shape
         if H % self.patch_size != 0 or W % self.patch_size != 0:
             raise ValueError(f"Image size {(H, W)} not divisible by patch_size {self.patch_size}")
@@ -112,8 +138,18 @@ class ExternalPairedBitPlaneDataset(Dataset):
         clean_u8 = to_uint8(clean)
 
         lsb, msb = make_lsb_msb(noisy_u8)
-        mask_pix = lsb_xor_mask(noisy_u8, clean_u8)
-        mask_gt = pool_to_patch_mask(mask_pix, self.patch_size)
+        if self.use_residual_mask:
+            mask_gt = residual_soft_mask(
+                noisy,
+                clean,
+                patch_size=self.patch_size,
+                temperature=self.mask_temperature,
+                use_quantile=self.mask_use_quantile,
+                quantile=self.mask_quantile,
+            )
+        else:
+            mask_pix = lsb_xor_mask(noisy_u8, clean_u8)
+            mask_gt = pool_to_patch_mask(mask_pix, self.patch_size)
         if self.return_mask_flat:
             mask_gt = mask_gt.flatten().unsqueeze(1)  # (h*w, 1)
 
@@ -134,3 +170,18 @@ class ExternalPairedBitPlaneDataset(Dataset):
             "path_noisy": path_noisy,
             "path_clean": path_clean,
         }
+
+    def _fit_to_patch(self, img: torch.Tensor) -> torch.Tensor:
+        """
+        Center-crop to the largest region divisible by patch_size.
+        """
+        _, H, W = img.shape
+        new_h = (H // self.patch_size) * self.patch_size
+        new_w = (W // self.patch_size) * self.patch_size
+        if new_h == 0 or new_w == 0:
+            raise ValueError(f"Image too small to fit patch_size {self.patch_size}: {(H, W)}")
+        if new_h == H and new_w == W:
+            return img
+        top = (H - new_h) // 2
+        left = (W - new_w) // 2
+        return img[:, top : top + new_h, left : left + new_w]

@@ -15,3 +15,11 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+
+# Generated outputs (figures, visualizations)
+outputs/
+*.png
+*.jpg
+*.jpeg
+*.tif
+*.tiff
