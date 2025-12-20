@@ -59,7 +59,7 @@ def train_one_epoch(model, dl, optimizer, device, epoch, args):
     return avg_loss
 
 
-def validate(model, dl, device, lpips_loss):
+def validate(model, dl, device, lpips_loss, epoch, save_dir):
     model.eval()
     psnr_acc = 0.0
     ssim_acc = 0.0
@@ -85,7 +85,12 @@ def validate(model, dl, device, lpips_loss):
     avg_ssim = ssim_acc / max(count, 1)
     avg_lpips = lpips_acc / max(count, 1)
     
-    print(f"Validation - PSNR: {avg_psnr:.3f} | SSIM: {avg_ssim:.4f} | LPIPS: {avg_lpips:.4f}")
+    log_msg = f"Epoch {epoch} Validation - PSNR: {avg_psnr:.3f} | SSIM: {avg_ssim:.4f} | LPIPS: {avg_lpips:.4f}"
+    print(log_msg)
+    
+    with open(os.path.join(save_dir, "log.txt"), "a") as f:
+        f.write(log_msg + "\n")
+        
     return avg_psnr, avg_ssim, avg_lpips
 
 
@@ -180,8 +185,8 @@ def main():
             torch.save(model.state_dict(), ckpt_path)
             print(f"Saved checkpoint to {ckpt_path}")
             
-        # Run validation
-        validate(model, val_dl, args.device, lpips_loss)
+            # Run validation
+            validate(model, val_dl, args.device, lpips_loss, epoch, args.save_dir)
 
 if __name__ == "__main__":
     main()

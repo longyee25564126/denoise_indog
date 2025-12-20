@@ -132,9 +132,16 @@ def residual_soft_mask(
         y_float01 = y_float01.unsqueeze(0)
         added_batch = True
 
-    x_u8 = to_uint8(x_float01)
-    y_u8 = to_uint8(y_float01)
-    err = (x_u8.to(torch.float32) - y_u8.to(torch.float32)).abs().mean(dim=1, keepdim=True)  # (B,1,H,W)
+    # Use float precision directly, avoid to_uint8 quantization
+    # x_float01 and y_float01 are already in [0, 1]
+    err = (x_float01 - y_float01).abs().mean(dim=1, keepdim=True)  # (B,1,H,W)
+    
+    # Scale error to be roughly compatible with previous 0-255 scale logic if needed,
+    # or just adjust temperature.
+    # Previous logic: err_u8 = abs(x*255 - y*255) = abs(x-y)*255
+    # So err_u8 = err_float * 255.
+    # To keep temperature meaning similar, we can scale err by 255 here.
+    err = err * 255.0
 
     if use_quantile:
         # per-image quantile as scale, avoid zeros
