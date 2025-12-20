@@ -73,12 +73,30 @@ def main():
     parser.add_argument("--patch-size", type=int, default=8)
     parser.add_argument("--crop-size", type=int, default=256)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--save-dir", type=str, default="youming_models/checkpoints")
+    parser.add_argument("--save-dir", type=str, default="youming_models/output/checkpoint")
     parser.add_argument("--lambda-mask", type=float, default=0.5)
     parser.add_argument("--log-interval", type=int, default=10)
     parser.add_argument("--limit-batches", type=int, default=0, help="Limit batches per epoch for debugging")
+    parser.add_argument("--save-interval", type=int, default=10, help="Save checkpoint every N epochs")
+    
+    parser.add_argument("--config", type=str, default=None, help="Path to config.yaml")
     
     args = parser.parse_args()
+
+    # Load config if specified
+    if args.config:
+        import yaml
+        with open(args.config, "r") as f:
+            config = yaml.safe_load(f)
+        
+        # Override args with config values
+        for k, v in config.items():
+            # Only override if the argument exists in argparse
+            if hasattr(args, k):
+                setattr(args, k, v)
+            else:
+                print(f"Warning: Config key '{k}' not found in arguments.")
+        print(f"Loaded configuration from {args.config}")
 
     os.makedirs(args.save_dir, exist_ok=True)
 
@@ -111,10 +129,11 @@ def main():
     for epoch in range(1, args.epochs + 1):
         train_one_epoch(model, dl, optimizer, args.device, epoch, args)
         
-        # Save checkpoint
-        ckpt_path = os.path.join(args.save_dir, f"epoch_{epoch}.pth")
-        torch.save(model.state_dict(), ckpt_path)
-        print(f"Saved checkpoint to {ckpt_path}")
+        # Save checkpoint based on interval
+        if epoch % args.save_interval == 0 or epoch == args.epochs:
+            ckpt_path = os.path.join(args.save_dir, f"epoch_{epoch}.pth")
+            torch.save(model.state_dict(), ckpt_path)
+            print(f"Saved checkpoint to {ckpt_path}")
 
 if __name__ == "__main__":
     main()

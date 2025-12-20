@@ -33,7 +33,7 @@ def main():
     parser.add_argument("--root", type=str, default="/home/youming/dataset_and_data_loader/dataset final version", help="Dataset root")
     parser.add_argument("--external-module", type=str, default="/home/youming/dataset_and_data_loader/data_loader.py", help="Path to data_loader.py")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint")
-    parser.add_argument("--save-dir", type=str, default="youming_models/outputs", help="Output directory")
+    parser.add_argument("--save-dir", type=str, default="youming_models/output/vis", help="Output directory")
     parser.add_argument("--num-samples", type=int, default=5, help="Number of samples to visualize")
     parser.add_argument("--patch-size", type=int, default=8)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")

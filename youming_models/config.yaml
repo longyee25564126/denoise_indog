@@ -1,0 +1,22 @@
+# Training Configuration
+
+# Dataset paths
+root: "/home/youming/dataset_and_data_loader/dataset final version"
+external_module: "/home/youming/dataset_and_data_loader/data_loader.py"
+
+# Training hyperparameters
+epochs: 10
+batch_size: 8
+lr: 0.0001
+patch_size: 8
+crop_size: 256
+lambda_mask: 0.5
+
+# Output directories
+save_dir: "youming_models/output/checkpoint"
+save_interval: 10  # Save every N epochs
+
+# System
+device: "cuda"  # or "cpu"
+log_interval: 10
+limit_batches: 0  # 0 for no limit
