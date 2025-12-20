@@ -30,7 +30,7 @@ class DenoiseDecoder(nn.Module):
         mlp_ratio: float = 4.0,
         dropout: float = 0.0,
         patch_size: int = 8,
-        use_concat_fuse: bool = True,
+        use_concat_fuse: bool = False,  # Deprecated
         clamp_output: bool = False,
         max_patches: int = 1024,
     ):
@@ -38,7 +38,10 @@ class DenoiseDecoder(nn.Module):
         self.patch_size = patch_size
         self.clamp_output = clamp_output
 
-        self.fuse = nn.Linear(2 * embed_dim, embed_dim) if use_concat_fuse else nn.Identity()
+        # Cross Attention: Query=MSB, Key=LSB, Value=LSB
+        self.cross_attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.dropout1 = nn.Dropout(dropout)
 
         ff_dim = int(mlp_ratio * embed_dim)
         layer = nn.TransformerEncoderLayer(
@@ -71,8 +74,10 @@ class DenoiseDecoder(nn.Module):
         assert lsb_tokens.shape == (B, N, D)
         assert m_hat_tok.shape[0] == B and m_hat_tok.shape[1] == N
 
-        T_cat = torch.cat([msb_tokens, lsb_tokens], dim=-1)  # (B, N, 2D)
-        T_in = self.fuse(T_cat)  # (B, N, D)
+        # Cross Attention: Q=MSB, K=LSB, V=LSB
+        # T_in = Norm(MSB + CrossAttn(MSB, LSB, LSB))
+        attn_out, _ = self.cross_attn(query=msb_tokens, key=lsb_tokens, value=lsb_tokens)
+        T_in = self.norm1(msb_tokens + self.dropout1(attn_out))
 
         if N == self.pos_embed.shape[1]:
             T_in = T_in + self.pos_embed

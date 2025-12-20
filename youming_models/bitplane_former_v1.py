@@ -2,7 +2,7 @@ import torch
 from torch import nn
 
 from .tokenizer_cnn import ConvPatchTokenizer
-from .msb_encoder import MSBEncoder
+# from .msb_encoder import MSBEncoder
 from .lsb_mask_head import LSBMaskHead
 from .denoise_decoder import DenoiseDecoder
 
@@ -21,9 +21,9 @@ class BitPlaneFormerV1(nn.Module):
         super().__init__()
         self.patch_size = patch_size
 
-        self.msb_tokenizer = ConvPatchTokenizer(in_ch=12, embed_dim=embed_dim, patch_size=patch_size)
-        self.lsb_tokenizer = ConvPatchTokenizer(in_ch=12, embed_dim=embed_dim, patch_size=patch_size)
-        self.msb_encoder = MSBEncoder(embed_dim=embed_dim, num_heads=num_heads, depth=msb_depth, mlp_ratio=mlp_ratio, dropout=dropout)
+        self.msb_tokenizer = ConvPatchTokenizer(in_ch=6, embed_dim=embed_dim, patch_size=patch_size)
+        self.lsb_tokenizer = ConvPatchTokenizer(in_ch=18, embed_dim=embed_dim, patch_size=patch_size)
+        # self.msb_encoder removed as per refactor
         self.mask_head = LSBMaskHead(embed_dim=embed_dim, hidden_dim=None, dropout=dropout)
         self.decoder = DenoiseDecoder(
             embed_dim=embed_dim,
@@ -32,7 +32,7 @@ class BitPlaneFormerV1(nn.Module):
             mlp_ratio=mlp_ratio,
             dropout=dropout,
             patch_size=patch_size,
-            use_concat_fuse=True,
+            use_concat_fuse=False,  # Changed to False, though logic inside decoder will change anyway
             clamp_output=False,
         )
 
@@ -53,9 +53,11 @@ class BitPlaneFormerV1(nn.Module):
         T_lsb0, grid_shape_lsb = self.lsb_tokenizer(lsb)
         assert grid_shape == grid_shape_lsb, "MSB/LSB grids mismatch"
 
-        T_msb = self.msb_encoder(T_msb0)
+        # T_msb = self.msb_encoder(T_msb0) # Removed
         mask_out = self.mask_head(T_lsb0, grid_shape)
-        dec_out = self.decoder(x_rgb, T_msb, T_lsb0, mask_out["m_hat_tok"], grid_shape)
+        
+        # Pass raw MSB tokens (T_msb0) to decoder
+        dec_out = self.decoder(x_rgb, T_msb0, T_lsb0, mask_out["m_hat_tok"], grid_shape)
 
         out = {
             "y_hat": dec_out["y_hat"],
