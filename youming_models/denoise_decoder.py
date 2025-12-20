@@ -38,7 +38,7 @@ class DenoiseDecoder(nn.Module):
         self.patch_size = patch_size
         self.clamp_output = clamp_output
 
-        # Cross Attention: Query=MSB, Key=LSB, Value=LSB
+        # Cross Attention: Query=LSB, Key=MSB, Value=MSB
         self.cross_attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
         self.norm1 = nn.LayerNorm(embed_dim)
         self.dropout1 = nn.Dropout(dropout)
@@ -57,9 +57,11 @@ class DenoiseDecoder(nn.Module):
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
         self.residual_head = nn.Sequential(
-            nn.LayerNorm(embed_dim),
+            nn.Linear(embed_dim, embed_dim),
+            nn.GELU(),
             nn.Linear(embed_dim, 3 * patch_size * patch_size),
         )
+        self.output_scale = nn.Parameter(torch.tensor(10.0))
 
     def forward(
         self,
@@ -74,10 +76,10 @@ class DenoiseDecoder(nn.Module):
         assert lsb_tokens.shape == (B, N, D)
         assert m_hat_tok.shape[0] == B and m_hat_tok.shape[1] == N
 
-        # Cross Attention: Q=MSB, K=LSB, V=LSB
-        # T_in = Norm(MSB + CrossAttn(MSB, LSB, LSB))
-        attn_out, _ = self.cross_attn(query=msb_tokens, key=lsb_tokens, value=lsb_tokens)
-        T_in = self.norm1(msb_tokens + self.dropout1(attn_out))
+        # Cross Attention: Q=LSB, K=MSB, V=MSB
+        # T_in = Norm(LSB + CrossAttn(LSB, MSB, MSB))
+        attn_out, _ = self.cross_attn(query=lsb_tokens, key=msb_tokens, value=msb_tokens)
+        T_in = self.norm1(lsb_tokens + self.dropout1(attn_out))
 
         if N == self.pos_embed.shape[1]:
             T_in = T_in + self.pos_embed
@@ -89,7 +91,7 @@ class DenoiseDecoder(nn.Module):
 
         T_dec = self.decoder(T_in)  # (B, N, D)
 
-        R_tok = self.residual_head(T_dec)  # (B, N, 3*P*P)
+        R_tok = self.residual_head(T_dec) * self.output_scale  # (B, N, 3*P*P)
         R_tok_gated = R_tok * m_hat_tok  # broadcast gating
 
         residual_gated = unpatchify(R_tok_gated, h, w, self.patch_size)  # (B,3,H,W)

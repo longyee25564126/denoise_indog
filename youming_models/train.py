@@ -73,7 +73,7 @@ def main():
     parser.add_argument("--patch-size", type=int, default=8)
     parser.add_argument("--crop-size", type=int, default=256)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--save-dir", type=str, default="models/checkpoints_youming")
+    parser.add_argument("--save-dir", type=str, default="youming_models/checkpoints")
     parser.add_argument("--lambda-mask", type=float, default=0.5)
     parser.add_argument("--log-interval", type=int, default=10)
     parser.add_argument("--limit-batches", type=int, default=0, help="Limit batches per epoch for debugging")
