@@ -3,7 +3,7 @@ import os
 import sys
 import torch
 from torch.utils.data import DataLoader
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 # Add root to sys.path
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -82,6 +82,45 @@ class SimpleFolderDataset(Dataset):
             "y": y,
             "has_clean": has_clean
         }
+
+def create_grid_image(images, titles):
+    """
+    Concatenate images horizontally with titles.
+    images: list of PIL Images
+    titles: list of strings
+    """
+    assert len(images) == len(titles)
+    
+    # Assume all images have same size
+    w, h = images[0].size
+    gap = 10
+    top_margin = 30
+    
+    total_w = w * len(images) + gap * (len(images) - 1)
+    total_h = h + top_margin
+    
+    grid_img = Image.new('RGB', (total_w, total_h), color=(255, 255, 255))
+    draw = ImageDraw.Draw(grid_img)
+    
+    try:
+        font = ImageFont.truetype("arial.ttf", 20)
+    except IOError:
+        font = ImageFont.load_default()
+    
+    for i, (img, title) in enumerate(zip(images, titles)):
+        x_offset = i * (w + gap)
+        
+        # Draw title
+        # Calculate text width to center it (approximate if using default font)
+        bbox = draw.textbbox((0, 0), title, font=font)
+        text_w = bbox[2] - bbox[0]
+        text_x = x_offset + (w - text_w) // 2
+        draw.text((text_x, 5), title, fill=(0, 0, 0), font=font)
+        
+        # Paste image
+        grid_img.paste(img, (x_offset, top_margin))
+        
+    return grid_img
 
 def main():
     parser = argparse.ArgumentParser(description="Inference for BitPlaneUNet")
@@ -174,14 +213,34 @@ def main():
             name = os.path.basename(path)
             short_name = f"{parent}_{name}"
             
-            tensor_to_pil(x[0]).save(os.path.join(args.output_dir, f"{short_name}_input.png"))
-            # User requested "_clean" suffix for the result
-            tensor_to_pil(y_hat[0]).save(os.path.join(args.output_dir, f"{short_name}_clean.png"))
-            tensor_to_pil(m_hat[0]).save(os.path.join(args.output_dir, f"{short_name}_mask.png"))
+            # Collect images for grid
+            img_list = []
+            title_list = []
             
-            # Save GT if available
+            # 1. Noisy
+            img_noisy = tensor_to_pil(x[0])
+            img_list.append(img_noisy)
+            title_list.append("Noisy")
+            
+            # 2. Denoised (Clean)
+            img_denoised = tensor_to_pil(y_hat[0])
+            img_list.append(img_denoised)
+            title_list.append("Denoised")
+            
+            # 3. GT (if available)
             if "has_clean" in batch and batch["has_clean"][0]:
-                 tensor_to_pil(y[0]).save(os.path.join(args.output_dir, f"{short_name}_gt.png"))
+                 img_gt = tensor_to_pil(y[0])
+                 img_list.append(img_gt)
+                 title_list.append("GT")
+            
+            # 4. Mask
+            img_mask = tensor_to_pil(m_hat[0])
+            img_list.append(img_mask)
+            title_list.append("Mask")
+            
+            # Create and save grid
+            grid_img = create_grid_image(img_list, title_list)
+            grid_img.save(os.path.join(args.output_dir, f"{short_name}_combined.png"))
             
             count += 1
             if count >= len(targets):
