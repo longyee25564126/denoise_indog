@@ -14,6 +14,7 @@ if ROOT_DIR not in sys.path:
 
 from youming_models.external_adapter import ExternalPairedBitPlaneDataset
 from youming_models.bitplane_former_v1 import BitPlaneFormerV1
+from youming_models.metrics import calculate_psnr, calculate_ssim, LPIPS
 
 
 def train_one_epoch(model, dl, optimizer, device, epoch, args):
@@ -56,6 +57,36 @@ def train_one_epoch(model, dl, optimizer, device, epoch, args):
     duration = time.time() - start_time
     print(f"Epoch {epoch} done. Avg Loss: {avg_loss:.4f}. Time: {duration:.2f}s")
     return avg_loss
+
+
+def validate(model, dl, device, lpips_loss):
+    model.eval()
+    psnr_acc = 0.0
+    ssim_acc = 0.0
+    lpips_acc = 0.0
+    count = 0
+    
+    with torch.no_grad():
+        for batch in dl:
+            x = batch["x"].to(device)
+            y = batch["y"].to(device)
+            lsb = batch["lsb"].to(device)
+            msb = batch["msb"].to(device)
+            
+            out = model(x, lsb, msb)
+            y_hat = out["y_hat"].clamp(0.0, 1.0)
+            
+            psnr_acc += calculate_psnr(y_hat, y)
+            ssim_acc += calculate_ssim(y_hat, y)
+            lpips_acc += lpips_loss(y_hat, y).item()
+            count += 1
+            
+    avg_psnr = psnr_acc / max(count, 1)
+    avg_ssim = ssim_acc / max(count, 1)
+    avg_lpips = lpips_acc / max(count, 1)
+    
+    print(f"Validation - PSNR: {avg_psnr:.3f} | SSIM: {avg_ssim:.4f} | LPIPS: {avg_lpips:.4f}")
+    return avg_psnr, avg_ssim, avg_lpips
 
 
 def main():
@@ -113,6 +144,20 @@ def main():
 
     dl = DataLoader(ds, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
 
+    # Validation Dataset
+    val_ds = ExternalPairedBitPlaneDataset(
+        module_path=args.external_module,
+        root_dir=args.root,
+        patch_size=args.patch_size,
+        crop_size=args.crop_size,
+        augment=False,
+        split="val"  # Assuming 'val' split exists in external dataset
+    )
+    val_dl = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
+
+    # Metrics
+    lpips_loss = LPIPS().to(args.device).eval()
+
     model = BitPlaneFormerV1(
         patch_size=args.patch_size,
         embed_dim=256,
@@ -134,6 +179,9 @@ def main():
             ckpt_path = os.path.join(args.save_dir, f"epoch_{epoch}.pth")
             torch.save(model.state_dict(), ckpt_path)
             print(f"Saved checkpoint to {ckpt_path}")
+            
+        # Run validation
+        validate(model, val_dl, args.device, lpips_loss)
 
 if __name__ == "__main__":
     main()

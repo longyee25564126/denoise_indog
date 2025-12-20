@@ -5,7 +5,7 @@ root: "/home/youming/dataset_and_data_loader/dataset final version"
 external_module: "/home/youming/dataset_and_data_loader/data_loader.py"
 
 # Training hyperparameters
-epochs: 10
+epochs: 100
 batch_size: 8
 lr: 0.0001
 patch_size: 8
