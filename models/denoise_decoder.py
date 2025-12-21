@@ -1,8 +1,15 @@
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 
-def unpatchify(patches: torch.Tensor, h: int, w: int, patch_size: int) -> torch.Tensor:
+def unpatchify(
+    patches: torch.Tensor,
+    h: int,
+    w: int,
+    patch_size: int,
+    patch_stride: int | None = None,
+) -> torch.Tensor:
     """
     Convert patch tokens of shape (B, N, 3*P*P) back to an image (B, 3, H, W)
     where N = h*w, H = h*P, W = w*P.
@@ -12,12 +19,27 @@ def unpatchify(patches: torch.Tensor, h: int, w: int, patch_size: int) -> torch.
     assert PP == 3 * P * P, f"Expected channel size 3*P*P, got {PP}"
     assert N == h * w, f"N ({N}) != h*w ({h*w})"
 
-    patches = patches.view(B, h, w, 3, P, P)
-    img = (
-        patches.permute(0, 3, 1, 4, 2, 5)
-        .contiguous()
-        .view(B, 3, h * P, w * P)
-    )
+    if patch_stride is None:
+        patch_stride = patch_size
+
+    if patch_stride == patch_size:
+        patches = patches.view(B, h, w, 3, P, P)
+        img = (
+            patches.permute(0, 3, 1, 4, 2, 5)
+            .contiguous()
+            .view(B, 3, h * P, w * P)
+        )
+        return img
+
+    S = patch_stride
+    patches = patches.transpose(1, 2)  # (B, 3*P*P, N)
+    out_h = P + (h - 1) * S
+    out_w = P + (w - 1) * S
+    img = F.fold(patches, output_size=(out_h, out_w), kernel_size=P, stride=S)
+
+    ones = torch.ones((1, 1 * P * P, N), device=patches.device, dtype=patches.dtype)
+    norm = F.fold(ones, output_size=(out_h, out_w), kernel_size=P, stride=S)
+    img = img / norm.clamp_min(1e-6)
     return img
 
 
@@ -30,11 +52,13 @@ class DenoiseDecoder(nn.Module):
         mlp_ratio: float = 4.0,
         dropout: float = 0.0,
         patch_size: int = 8,
+        patch_stride: int | None = None,
         use_concat_fuse: bool = True,
         clamp_output: bool = False,
     ):
         super().__init__()
         self.patch_size = patch_size
+        self.patch_stride = patch_stride if patch_stride is not None else patch_size
         self.clamp_output = clamp_output
 
         self.fuse = nn.Linear(2 * embed_dim, embed_dim) if use_concat_fuse else nn.Identity()
@@ -76,7 +100,7 @@ class DenoiseDecoder(nn.Module):
         R_tok = self.residual_head(T_dec)  # (B, N, 3*P*P)
         R_tok_gated = R_tok * m_hat_tok  # broadcast gating
 
-        residual_gated = unpatchify(R_tok_gated, h, w, self.patch_size)  # (B,3,H,W)
+        residual_gated = unpatchify(R_tok_gated, h, w, self.patch_size, self.patch_stride)  # (B,3,H,W)
 
         y_hat = x_rgb - residual_gated
         if self.clamp_output:
@@ -98,10 +122,12 @@ class DenoiseDecoderQMSB(nn.Module):
         mlp_ratio: float = 4.0,
         dropout: float = 0.0,
         patch_size: int = 8,
+        patch_stride: int | None = None,
         clamp_output: bool = False,
     ):
         super().__init__()
         self.patch_size = patch_size
+        self.patch_stride = patch_stride if patch_stride is not None else patch_size
         self.clamp_output = clamp_output
 
         ff_dim = int(mlp_ratio * embed_dim)
@@ -138,7 +164,7 @@ class DenoiseDecoderQMSB(nn.Module):
         R_tok = self.residual_head(T_dec)  # (B, N, 3*P*P)
         R_tok_gated = R_tok * m_hat_tok  # broadcast gating
 
-        residual_gated = unpatchify(R_tok_gated, h, w, self.patch_size)  # (B,3,H,W)
+        residual_gated = unpatchify(R_tok_gated, h, w, self.patch_size, self.patch_stride)  # (B,3,H,W)
 
         y_hat = x_rgb - residual_gated
         if self.clamp_output:
@@ -162,11 +188,13 @@ class DenoiseDecoderStdEncDec(nn.Module):
         mlp_ratio: float = 4.0,
         dropout: float = 0.0,
         patch_size: int = 8,
+        patch_stride: int | None = None,
         query_grid_size: tuple[int, int] = (16, 16),
         clamp_output: bool = False,
     ):
         super().__init__()
         self.patch_size = patch_size
+        self.patch_stride = patch_stride if patch_stride is not None else patch_size
         self.clamp_output = clamp_output
 
         ff_dim = int(mlp_ratio * embed_dim)
@@ -221,7 +249,7 @@ class DenoiseDecoderStdEncDec(nn.Module):
         T_dec = self.decoder(tgt=q, memory=memory)  # (B, N, D)
 
         R_tok = self.residual_head(T_dec)  # (B, N, 3*P*P)
-        residual = unpatchify(R_tok, h, w, self.patch_size)  # (B,3,H,W)
+        residual = unpatchify(R_tok, h, w, self.patch_size, self.patch_stride)  # (B,3,H,W)
 
         y_hat = x_rgb - residual
         if self.clamp_output:

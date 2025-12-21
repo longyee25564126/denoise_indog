@@ -28,12 +28,13 @@ def _make_dummy_dataset(root: str, num_images: int = 3, size: int = 256) -> None
         Image.fromarray(clean).save(os.path.join(clean_dir, f"img_{i}.png"))
 
 
-def describe_sample(sample: dict, patch_size: int) -> None:
+def describe_sample(sample: dict, patch_size: int, patch_stride: int) -> None:
     x, y = sample["x"], sample["y"]
     lsb, msb = sample["lsb"], sample["msb"]
     mask_gt = sample["mask_gt"]
     H, W = x.shape[1], x.shape[2]
-    h, w = H // patch_size, W // patch_size
+    h = (H - patch_size) // patch_stride + 1
+    w = (W - patch_size) // patch_stride + 1
 
     print(f"x shape {tuple(x.shape)}, dtype {x.dtype}, min/max {x.min().item():.3f}/{x.max().item():.3f}")
     print(f"y shape {tuple(y.shape)}, dtype {y.dtype}, min/max {y.min().item():.3f}/{y.max().item():.3f}")
@@ -44,8 +45,9 @@ def describe_sample(sample: dict, patch_size: int) -> None:
     else:
         assert mask_gt.shape[0] == h * w
     print(f"mask_gt shape {tuple(mask_gt.shape)}, min/max {mask_gt.min().item():.3f}/{mask_gt.max().item():.3f}")
-    assert H % patch_size == 0 and W % patch_size == 0
-    print(f"Passed divisibility check H%P={H%patch_size}, W%P={W%patch_size}")
+    assert H >= patch_size and W >= patch_size
+    assert (H - patch_size) % patch_stride == 0 and (W - patch_size) % patch_stride == 0
+    print(f"Passed alignment check P={patch_size}, S={patch_stride}")
     print(f"paths noisy={sample['path_noisy']}, clean={sample['path_clean']}")
     print("-" * 60)
 
@@ -62,6 +64,7 @@ def main() -> None:
         help="Path to external data_loader.py that defines PairedImageDataset.",
     )
     parser.add_argument("--patch-size", type=int, default=8)
+    parser.add_argument("--patch-stride", type=int, default=None)
     parser.add_argument("--crop-size", type=int, default=256)
     parser.add_argument("--num-samples", type=int, default=3)
     parser.add_argument("--augment", action="store_true", help="Enable flip/rot90 augment.")
@@ -72,6 +75,8 @@ def main() -> None:
     tmp_root = None
 
     try:
+        if args.patch_stride is None:
+            args.patch_stride = args.patch_size
         if args.use_external:
             if args.root is None:
                 raise ValueError("--use-external requires --root pointing to the external dataset root")
@@ -79,6 +84,7 @@ def main() -> None:
                 module_path=args.external_module,
                 root_dir=args.root,
                 patch_size=args.patch_size,
+                patch_stride=args.patch_stride,
                 crop_size=args.crop_size,
                 augment=args.augment,
                 return_mask_flat=args.return_mask_flat,
@@ -94,6 +100,7 @@ def main() -> None:
                 root=data_root,
                 pairs_file=args.pairs_file,
                 patch_size=args.patch_size,
+                patch_stride=args.patch_stride,
                 crop_size=args.crop_size,
                 augment=args.augment,
                 strict_pairing=True,
@@ -102,7 +109,7 @@ def main() -> None:
         print(f"Dataset size: {len(ds)}; showing {min(args.num_samples, len(ds))} samples")
         for idx in range(min(args.num_samples, len(ds))):
             sample = ds[idx]
-            describe_sample(sample, ds.patch_size)
+            describe_sample(sample, ds.patch_size, ds.patch_stride)
     finally:
         if using_tmp and tmp_root is not None:
             shutil.rmtree(tmp_root)

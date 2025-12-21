@@ -136,17 +136,21 @@ def main() -> None:
     parser.add_argument("--external-module", type=str, default="/home/longyee/datasets/dataset_and_data_loader/data_loader.py", help="Path to external data_loader.py defining PairedImageDataset.")
     parser.add_argument("--split", type=str, default="train", help="Split name for external loader.")
     parser.add_argument("--patch-size", type=int, default=8, help="Patch size used by dataset checks.")
+    parser.add_argument("--patch-stride", type=int, default=None, help="Patch stride for overlapping patches (default: patch_size).")
     parser.add_argument("--crop-size", type=int, default=None, help="Optional crop size (must divide patch size).")
     parser.add_argument("--index", type=int, default=None, help="Optional fixed sample index; defaults to random.")
     parser.add_argument("--scale", type=int, default=1, help="Integer up/down-scale when composing the grid.")
     parser.add_argument("--per-channel", action="store_true", help="Also save per-channel (R/G/B) bit-planes.")
     args = parser.parse_args()
+    if args.patch_stride is None:
+        args.patch_stride = args.patch_size
 
     if args.use_external:
         ds = ExternalPairedBitPlaneDataset(
             module_path=args.external_module,
             root_dir=args.root,
             patch_size=args.patch_size,
+            patch_stride=args.patch_stride,
             crop_size=args.crop_size,
             augment=False,
             return_mask_flat=False,
@@ -157,6 +161,7 @@ def main() -> None:
             root=args.root,
             pairs_file=args.pairs_file,
             patch_size=args.patch_size,
+            patch_stride=args.patch_stride,
             crop_size=args.crop_size,
             augment=False,
             strict_pairing=True,

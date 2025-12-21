@@ -24,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--external-module", type=str, default="/home/longyee/datasets/dataset_and_data_loader/data_loader.py")
     parser.add_argument("--split", type=str, default="val")
     parser.add_argument("--patch-size", type=int, default=8)
+    parser.add_argument("--patch-stride", type=int, default=None, help="Patch stride for overlapping patches (default: patch_size).")
     parser.add_argument("--crop-size", type=int, default=None)
     parser.add_argument("--fit-to-patch", action="store_true")
     parser.add_argument("--lsb-bits", type=int, nargs="+", default=[0, 1, 2, 3, 4, 5])
@@ -56,6 +57,7 @@ def load_dataset(args: argparse.Namespace) -> Tuple[ExternalPairedBitPlaneDatase
     ds = ExternalPairedBitPlaneDataset(
         base_dataset=base_dataset,
         patch_size=args.patch_size,
+        patch_stride=args.patch_stride,
         crop_size=args.crop_size,
         augment=False,
         return_mask_flat=False,
@@ -71,12 +73,18 @@ def load_dataset(args: argparse.Namespace) -> Tuple[ExternalPairedBitPlaneDatase
     return ds, {"size": len(ds)}
 
 
-def compute_mask_gt(x: torch.Tensor, y: torch.Tensor, patch_size: int, temperature: float) -> torch.Tensor:
+def compute_mask_gt(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    patch_size: int,
+    patch_stride: int,
+    temperature: float,
+) -> torch.Tensor:
     x_u8 = to_uint8(x)
     y_u8 = to_uint8(y)
     err = (x_u8.to(torch.float32) - y_u8.to(torch.float32)).abs().mean(dim=1, keepdim=True)
     mask_pix = torch.clamp(err / temperature, 0.0, 1.0)
-    mask_gt = F.avg_pool2d(mask_pix, kernel_size=patch_size, stride=patch_size)
+    mask_gt = F.avg_pool2d(mask_pix, kernel_size=patch_size, stride=patch_stride)
     return mask_gt
 
 
@@ -91,6 +99,25 @@ def main() -> None:
     args = parse_args()
     device_str = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     device = torch.device(device_str)
+    ckpt = torch.load(args.checkpoint, map_location="cpu")
+    ckpt_args = ckpt.get("args", {}) if isinstance(ckpt, dict) else {}
+
+    def _override_from_ckpt(name: str) -> None:
+        if name in ckpt_args:
+            new_val = ckpt_args[name]
+            cur_val = getattr(args, name, None)
+            if cur_val != new_val:
+                print(f"Override {name}: {cur_val} -> {new_val} (from checkpoint)")
+                setattr(args, name, new_val)
+
+    _override_from_ckpt("dec_type")
+    _override_from_ckpt("patch_size")
+    _override_from_ckpt("patch_stride")
+    _override_from_ckpt("lsb_bits")
+    _override_from_ckpt("msb_bits")
+
+    if args.patch_stride is None:
+        args.patch_stride = args.patch_size
     args.lsb_bits = expand_bits(args.lsb_bits)
     args.msb_bits = expand_bits(args.msb_bits)
 
@@ -99,10 +126,11 @@ def main() -> None:
 
     model = BitPlaneFormerV1(
         patch_size=args.patch_size,
+        patch_stride=args.patch_stride,
         lsb_bits=args.lsb_bits,
         msb_bits=args.msb_bits,
+        dec_type=args.dec_type or "fuse_encoder",
     ).to(device)
-    ckpt = torch.load(args.checkpoint, map_location=device)
     model.load_state_dict(ckpt["model"])
     model.eval()
     print(f"Loaded checkpoint {args.checkpoint}; dataset size {info['size']}")
@@ -125,7 +153,7 @@ def main() -> None:
                 keep = args.limit - total
                 x, y, lsb, msb = x[:keep], y[:keep], lsb[:keep], msb[:keep]
 
-            mask_gt = compute_mask_gt(x, y, args.patch_size, args.mask_T)
+            mask_gt = compute_mask_gt(x, y, args.patch_size, args.patch_stride, args.mask_T)
             ones_mask = torch.ones_like(mask_gt)
 
             out_pred = model({"x": x, "lsb": lsb, "msb": msb})

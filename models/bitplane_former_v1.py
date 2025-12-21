@@ -12,6 +12,7 @@ class BitPlaneFormerV1(nn.Module):
     def __init__(
         self,
         patch_size: int = 8,
+        patch_stride: int | None = None,
         embed_dim: int = 256,
         num_heads: int = 8,
         msb_depth: int = 6,
@@ -21,18 +22,33 @@ class BitPlaneFormerV1(nn.Module):
         lsb_bits: tuple[int, int] | list[int] = (0, 5),
         msb_bits: tuple[int, int] | list[int] = (6, 7),
         dec_type: str = "fuse_encoder",
+        lsb_depth: int | None = None,
     ):
         super().__init__()
         self.patch_size = patch_size
+        self.patch_stride = patch_stride if patch_stride is not None else patch_size
 
         lsb_bit_list = expand_bits(lsb_bits)
         msb_bit_list = expand_bits(msb_bits)
         self.lsb_in_ch = 3 * len(lsb_bit_list)
         self.msb_in_ch = 3 * len(msb_bit_list)
 
-        self.msb_tokenizer = ConvPatchTokenizer(in_ch=self.msb_in_ch, embed_dim=embed_dim, patch_size=patch_size)
-        self.lsb_tokenizer = ConvPatchTokenizer(in_ch=self.lsb_in_ch, embed_dim=embed_dim, patch_size=patch_size)
+        self.msb_tokenizer = ConvPatchTokenizer(
+            in_ch=self.msb_in_ch,
+            embed_dim=embed_dim,
+            patch_size=patch_size,
+            patch_stride=self.patch_stride,
+        )
+        self.lsb_tokenizer = ConvPatchTokenizer(
+            in_ch=self.lsb_in_ch,
+            embed_dim=embed_dim,
+            patch_size=patch_size,
+            patch_stride=self.patch_stride,
+        )
         self.msb_encoder = MSBEncoder(embed_dim=embed_dim, num_heads=num_heads, depth=msb_depth, mlp_ratio=mlp_ratio, dropout=dropout)
+        if lsb_depth is None:
+            lsb_depth = msb_depth
+        self.lsb_encoder = MSBEncoder(embed_dim=embed_dim, num_heads=num_heads, depth=lsb_depth, mlp_ratio=mlp_ratio, dropout=dropout)
         self.mask_head = LSBMaskHead(embed_dim=embed_dim, hidden_dim=None, dropout=dropout)
         dec_type = dec_type.lower()
         if dec_type == "fuse_encoder":
@@ -43,6 +59,7 @@ class BitPlaneFormerV1(nn.Module):
                 mlp_ratio=mlp_ratio,
                 dropout=dropout,
                 patch_size=patch_size,
+                patch_stride=self.patch_stride,
                 use_concat_fuse=True,
                 clamp_output=False,
             )
@@ -54,6 +71,7 @@ class BitPlaneFormerV1(nn.Module):
                 mlp_ratio=mlp_ratio,
                 dropout=dropout,
                 patch_size=patch_size,
+                patch_stride=self.patch_stride,
                 clamp_output=False,
             )
         elif dec_type == "std_encdec_msb":
@@ -64,6 +82,7 @@ class BitPlaneFormerV1(nn.Module):
                 mlp_ratio=mlp_ratio,
                 dropout=dropout,
                 patch_size=patch_size,
+                patch_stride=self.patch_stride,
                 clamp_output=False,
             )
         else:
@@ -91,43 +110,17 @@ class BitPlaneFormerV1(nn.Module):
 
         # Sanity checks on channel counts
         assert msb.shape[1] == self.msb_in_ch, f"Expected MSB channels {self.msb_in_ch}, got {msb.shape[1]}"
-        if self.dec_type != "std_encdec_msb":
-            assert lsb is not None and lsb.shape[1] == self.lsb_in_ch, f"Expected LSB channels {self.lsb_in_ch}, got {lsb.shape[1]}"
+        assert lsb is not None and lsb.shape[1] == self.lsb_in_ch, f"Expected LSB channels {self.lsb_in_ch}, got {lsb.shape[1]}"
 
         # Tokenize
         T_msb0, grid_shape = self.msb_tokenizer(msb)
         T_msb = self.msb_encoder(T_msb0)
 
-        if self.dec_type == "std_encdec_msb":
-            T_lsb0, grid_shape_lsb = self.lsb_tokenizer(lsb)
-            assert grid_shape == grid_shape_lsb, "MSB/LSB grids mismatch"
-            mask_out = self.mask_head(T_lsb0, grid_shape)
-            m_hat = mask_out["m_hat"]
-            m_hat_tok = mask_out["m_hat_tok"]
-
-            if mask_override is not None:
-                if mask_override.ndim == 3:
-                    mask_override = mask_override.unsqueeze(0)
-                assert mask_override.shape[0] == x_rgb.shape[0], "mask_override batch mismatch"
-                h, w = grid_shape
-                assert mask_override.shape[2] == h and mask_override.shape[3] == w, "mask_override spatial mismatch"
-                m_hat = mask_override
-                m_hat_tok = m_hat.permute(0, 2, 3, 1).contiguous().view(x_rgb.shape[0], -1, 1)
-
-            dec_out = self.decoder(x_rgb, T_msb, T_lsb0, m_hat_tok, grid_shape)
-            out = {
-                "y_hat": dec_out["y_hat"],
-                "residual_gated": dec_out["residual_gated"],
-                "m_logits": mask_out["m_logits"],
-                "m_hat": m_hat,
-            }
-            return out
-
-        # Other decoders require LSB + mask
         T_lsb0, grid_shape_lsb = self.lsb_tokenizer(lsb)
         assert grid_shape == grid_shape_lsb, "MSB/LSB grids mismatch"
+        T_lsb = self.lsb_encoder(T_lsb0)
 
-        mask_out = self.mask_head(T_lsb0, grid_shape)
+        mask_out = self.mask_head(T_lsb, grid_shape)
         m_hat = mask_out["m_hat"]
         m_hat_tok = mask_out["m_hat_tok"]
 
@@ -140,7 +133,7 @@ class BitPlaneFormerV1(nn.Module):
             m_hat = mask_override
             m_hat_tok = m_hat.permute(0, 2, 3, 1).contiguous().view(x_rgb.shape[0], -1, 1)
 
-        dec_out = self.decoder(x_rgb, T_msb, T_lsb0, m_hat_tok, grid_shape)
+        dec_out = self.decoder(x_rgb, T_msb, T_lsb, m_hat_tok, grid_shape)
 
         out = {
             "y_hat": dec_out["y_hat"],

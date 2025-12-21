@@ -71,6 +71,7 @@ class ExternalPairedBitPlaneDataset(Dataset):
         root_dir: Optional[str] = None,
         base_dataset: Optional[Dataset] = None,
         patch_size: int = 8,
+        patch_stride: int | None = None,
         crop_size: Optional[int] = None,
         augment: bool = False,
         return_mask_flat: bool = False,
@@ -85,6 +86,13 @@ class ExternalPairedBitPlaneDataset(Dataset):
     ):
         super().__init__()
         self.patch_size = patch_size
+        if patch_stride is None:
+            patch_stride = patch_size
+        if patch_stride <= 0:
+            raise ValueError("patch_stride must be positive")
+        if patch_stride > patch_size:
+            raise ValueError("patch_stride should not exceed patch_size (would create gaps)")
+        self.patch_stride = patch_stride
         self.crop_size = crop_size
         self.augment = augment
         self.return_mask_flat = return_mask_flat
@@ -97,8 +105,11 @@ class ExternalPairedBitPlaneDataset(Dataset):
         self.lsb_bits = lsb_bits
         self.msb_bits = msb_bits
 
-        if self.crop_size is not None and (self.crop_size % self.patch_size != 0):
-            raise ValueError("crop_size must be divisible by patch_size")
+        if self.crop_size is not None:
+            if self.crop_size < self.patch_size:
+                raise ValueError("crop_size must be >= patch_size")
+            if (self.crop_size - self.patch_size) % self.patch_stride != 0:
+                raise ValueError("crop_size must align with patch_size/patch_stride")
 
         if base_dataset is not None:
             self.base_dataset = base_dataset
@@ -135,8 +146,13 @@ class ExternalPairedBitPlaneDataset(Dataset):
             clean = self._fit_to_patch(clean)
 
         _, H, W = noisy.shape
-        if H % self.patch_size != 0 or W % self.patch_size != 0:
-            raise ValueError(f"Image size {(H, W)} not divisible by patch_size {self.patch_size}")
+        if H < self.patch_size or W < self.patch_size:
+            raise ValueError(f"Image size {(H, W)} smaller than patch_size {self.patch_size}")
+        if (H - self.patch_size) % self.patch_stride != 0 or (W - self.patch_size) % self.patch_stride != 0:
+            raise ValueError(
+                f"Image size {(H, W)} not aligned to patch_size/patch_stride "
+                f"(P={self.patch_size}, S={self.patch_stride})"
+            )
 
         noisy_u8 = to_uint8(noisy)
         clean_u8 = to_uint8(clean)
@@ -147,13 +163,14 @@ class ExternalPairedBitPlaneDataset(Dataset):
                 noisy,
                 clean,
                 patch_size=self.patch_size,
+                patch_stride=self.patch_stride,
                 temperature=self.mask_temperature,
                 use_quantile=self.mask_use_quantile,
                 quantile=self.mask_quantile,
             )
         else:
             mask_pix = lsb_xor_mask(noisy_u8, clean_u8)
-            mask_gt = pool_to_patch_mask(mask_pix, self.patch_size)
+            mask_gt = pool_to_patch_mask(mask_pix, self.patch_size, self.patch_stride)
         if self.return_mask_flat:
             mask_gt = mask_gt.flatten().unsqueeze(1)  # (h*w, 1)
 
@@ -177,11 +194,13 @@ class ExternalPairedBitPlaneDataset(Dataset):
 
     def _fit_to_patch(self, img: torch.Tensor) -> torch.Tensor:
         """
-        Center-crop to the largest region divisible by patch_size.
+        Center-crop to the largest region aligned to patch_size/patch_stride.
         """
         _, H, W = img.shape
-        new_h = (H // self.patch_size) * self.patch_size
-        new_w = (W // self.patch_size) * self.patch_size
+        if H < self.patch_size or W < self.patch_size:
+            raise ValueError(f"Image too small to fit patch_size {self.patch_size}: {(H, W)}")
+        new_h = self.patch_size + ((H - self.patch_size) // self.patch_stride) * self.patch_stride
+        new_w = self.patch_size + ((W - self.patch_size) // self.patch_stride) * self.patch_stride
         if new_h == 0 or new_w == 0:
             raise ValueError(f"Image too small to fit patch_size {self.patch_size}: {(H, W)}")
         if new_h == H and new_w == W:

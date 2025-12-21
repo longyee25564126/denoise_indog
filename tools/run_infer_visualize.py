@@ -32,12 +32,18 @@ def tensor_to_pil(img: torch.Tensor) -> Image.Image:
         raise ValueError(f"Unexpected tensor shape for image: {tuple(img.shape)}")
 
 
-def compute_mask_gt(x: torch.Tensor, y: torch.Tensor, patch_size: int, temperature: float) -> torch.Tensor:
+def compute_mask_gt(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    patch_size: int,
+    patch_stride: int,
+    temperature: float,
+) -> torch.Tensor:
     x_u8 = to_uint8(x)
     y_u8 = to_uint8(y)
     err = (x_u8.to(torch.float32) - y_u8.to(torch.float32)).abs().mean(dim=1, keepdim=True)
     mask_pix = torch.clamp(err / temperature, 0.0, 1.0)
-    mask_gt = F.avg_pool2d(mask_pix, kernel_size=patch_size, stride=patch_size)
+    mask_gt = F.avg_pool2d(mask_pix, kernel_size=patch_size, stride=patch_stride)
     return mask_gt
 
 
@@ -59,6 +65,7 @@ def load_dataset(args: argparse.Namespace, train: bool = False) -> Tuple[Externa
     ds = ExternalPairedBitPlaneDataset(
         base_dataset=base_dataset,
         patch_size=args.patch_size,
+        patch_stride=args.patch_stride,
         crop_size=args.crop_size,
         augment=train and args.augment,
         return_mask_flat=False,
@@ -83,6 +90,7 @@ def main() -> None:
     parser.add_argument("--index", type=int, default=-1, help="Sample index to visualize; -1 for random.")
     parser.add_argument("--name", type=str, default=None, help="Substring to pick sample by filename (noisy or clean).")
     parser.add_argument("--patch-size", type=int, default=8)
+    parser.add_argument("--patch-stride", type=int, default=None, help="Patch stride for overlapping patches (default: patch_size).")
     parser.add_argument("--crop-size", type=int, default=None)
     parser.add_argument("--augment", action="store_true", help="Enable augment for loading (usually off for eval).")
     parser.add_argument("--fit-to-patch", action="store_true", help="Center-crop to nearest patch-aligned size.")
@@ -97,6 +105,22 @@ def main() -> None:
 
     device_str = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     device = torch.device(device_str)
+
+    ckpt = None
+    ckpt_args = {}
+    if args.checkpoint:
+        ckpt = torch.load(args.checkpoint, map_location="cpu")
+        if isinstance(ckpt, dict):
+            ckpt_args = ckpt.get("args", {}) or {}
+            if args.patch_stride is None and "patch_stride" in ckpt_args:
+                args.patch_stride = ckpt_args["patch_stride"]
+            if args.dec_type is None and "dec_type" in ckpt_args:
+                args.dec_type = ckpt_args["dec_type"]
+            if "patch_size" in ckpt_args and ckpt_args["patch_size"] != args.patch_size:
+                print(f"Warning: checkpoint patch_size={ckpt_args['patch_size']} != args.patch_size={args.patch_size}")
+
+    if args.patch_stride is None:
+        args.patch_stride = args.patch_size
 
     args.lsb_bits = expand_bits(args.lsb_bits)
     args.msb_bits = expand_bits(args.msb_bits)
@@ -126,31 +150,19 @@ def main() -> None:
 
     model = BitPlaneFormerV1(
         patch_size=args.patch_size,
+        patch_stride=args.patch_stride,
         lsb_bits=args.lsb_bits,
         msb_bits=args.msb_bits,
         dec_type=args.dec_type or "fuse_encoder",
     ).to(device)
-    if args.checkpoint:
-        ckpt = torch.load(args.checkpoint, map_location=device)
-        if args.dec_type is None and isinstance(ckpt, dict):
-            ckpt_args = ckpt.get("args", {})
-            if isinstance(ckpt_args, dict) and "dec_type" in ckpt_args:
-                ckpt_dec = ckpt_args["dec_type"]
-                if ckpt_dec != model.dec_type:
-                    model = BitPlaneFormerV1(
-                        patch_size=args.patch_size,
-                        lsb_bits=args.lsb_bits,
-                        msb_bits=args.msb_bits,
-                        dec_type=ckpt_dec,
-                    ).to(device)
-                    print(f"Rebuilt model with dec_type from checkpoint: {ckpt_dec}")
+    if ckpt is not None:
         model.load_state_dict(ckpt["model"])
         print(f"Loaded checkpoint from {args.checkpoint}")
     model.eval()
 
     with torch.no_grad():
         out = model({"x": x, "lsb": lsb, "msb": msb})
-        mask_gt = compute_mask_gt(x, y, args.patch_size, args.mask_T)
+        mask_gt = compute_mask_gt(x, y, args.patch_size, args.patch_stride, args.mask_T)
 
     y_hat = out["y_hat"].clamp(0.0, 1.0).squeeze(0)
     x_vis = x.squeeze(0)

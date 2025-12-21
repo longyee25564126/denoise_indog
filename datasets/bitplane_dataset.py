@@ -67,6 +67,7 @@ class BitPlanePairDataset(Dataset):
         root: str,
         pairs_file: Optional[str] = None,
         patch_size: int = 8,
+        patch_stride: int | None = None,
         crop_size: Optional[int] = None,
         augment: bool = False,
         strict_pairing: bool = True,
@@ -82,6 +83,13 @@ class BitPlanePairDataset(Dataset):
         self.root = root
         self.pairs_file = pairs_file
         self.patch_size = patch_size
+        if patch_stride is None:
+            patch_stride = patch_size
+        if patch_stride <= 0:
+            raise ValueError("patch_stride must be positive")
+        if patch_stride > patch_size:
+            raise ValueError("patch_stride should not exceed patch_size (would create gaps)")
+        self.patch_stride = patch_stride
         self.crop_size = crop_size
         self.augment = augment
         self.strict_pairing = strict_pairing
@@ -93,8 +101,11 @@ class BitPlanePairDataset(Dataset):
         self.lsb_bits = lsb_bits
         self.msb_bits = msb_bits
 
-        if self.crop_size is not None and (self.crop_size % self.patch_size != 0):
-            raise ValueError("crop_size must be divisible by patch_size")
+        if self.crop_size is not None:
+            if self.crop_size < self.patch_size:
+                raise ValueError("crop_size must be >= patch_size")
+            if (self.crop_size - self.patch_size) % self.patch_stride != 0:
+                raise ValueError("crop_size must align with patch_size/patch_stride")
 
         if pairs_file:
             self.samples = self._load_from_pairs_file(pairs_file)
@@ -162,8 +173,13 @@ class BitPlanePairDataset(Dataset):
             x, y = _augment_pair(x, y)
 
         _, H, W = x.shape
-        if H % self.patch_size != 0 or W % self.patch_size != 0:
-            raise ValueError(f"Image size {(H, W)} not divisible by patch_size {self.patch_size}")
+        if H < self.patch_size or W < self.patch_size:
+            raise ValueError(f"Image size {(H, W)} smaller than patch_size {self.patch_size}")
+        if (H - self.patch_size) % self.patch_stride != 0 or (W - self.patch_size) % self.patch_stride != 0:
+            raise ValueError(
+                f"Image size {(H, W)} not aligned to patch_size/patch_stride "
+                f"(P={self.patch_size}, S={self.patch_stride})"
+            )
 
         x_u8 = to_uint8(x)
         y_u8 = to_uint8(y)
@@ -174,13 +190,14 @@ class BitPlanePairDataset(Dataset):
                 x,
                 y,
                 patch_size=self.patch_size,
+                patch_stride=self.patch_stride,
                 temperature=self.mask_temperature,
                 use_quantile=self.mask_use_quantile,
                 quantile=self.mask_quantile,
             )
         else:
             mask_pix = lsb_xor_mask(x_u8, y_u8)
-            mask_gt = pool_to_patch_mask(mask_pix, self.patch_size)
+            mask_gt = pool_to_patch_mask(mask_pix, self.patch_size, self.patch_stride)
         if self.return_mask_flat:
             mask_gt = mask_gt.flatten().unsqueeze(1)  # (h*w, 1); grid shape is (1, h, w) by default
 

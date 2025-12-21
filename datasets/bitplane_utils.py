@@ -87,20 +87,26 @@ def lsb_xor_mask(u8_noisy: torch.Tensor, u8_clean: torch.Tensor) -> torch.Tensor
     return m_gt_pix
 
 
-def pool_to_patch_mask(m_gt_pix: torch.Tensor, patch_size: int) -> torch.Tensor:
+def pool_to_patch_mask(
+    m_gt_pix: torch.Tensor,
+    patch_size: int,
+    patch_stride: int | None = None,
+) -> torch.Tensor:
     """
     Average-pool pixel-level mask to patch grid.
 
     Args:
         m_gt_pix: float tensor (1, H, W)
-        patch_size: pooling kernel/stride
+        patch_size: pooling kernel size
+        patch_stride: pooling stride (defaults to patch_size)
 
     Returns:
         mask_gt_grid: float tensor (1, h, w)
     """
     import torch.nn.functional as F
 
-    pooled = F.avg_pool2d(m_gt_pix.unsqueeze(0), kernel_size=patch_size, stride=patch_size)
+    stride = patch_stride if patch_stride is not None else patch_size
+    pooled = F.avg_pool2d(m_gt_pix.unsqueeze(0), kernel_size=patch_size, stride=stride)
     return pooled.squeeze(0)
 
 
@@ -108,6 +114,7 @@ def residual_soft_mask(
     x_float01: torch.Tensor,
     y_float01: torch.Tensor,
     patch_size: int,
+    patch_stride: int | None = None,
     temperature: float = 32.0,
     use_quantile: bool = False,
     quantile: float = 0.9,
@@ -118,7 +125,8 @@ def residual_soft_mask(
     Args:
         x_float01: noisy image float [0,1], shape (3,H,W) or (B,3,H,W)
         y_float01: clean image float [0,1], shape (3,H,W) or (B,3,H,W)
-        patch_size: pooling kernel/stride
+        patch_size: pooling kernel size
+        patch_stride: pooling stride (defaults to patch_size)
         temperature: fixed scale for normalization when use_quantile=False
         use_quantile: if True, use per-image quantile of residual as scale
         quantile: quantile value in (0,1) when use_quantile=True
@@ -151,7 +159,8 @@ def residual_soft_mask(
         scale = torch.tensor(temperature, device=err.device, dtype=err.dtype)
 
     mask_pix = torch.clamp(err / scale, 0.0, 1.0)
-    mask_gt = F.avg_pool2d(mask_pix, kernel_size=patch_size, stride=patch_size)
+    stride = patch_stride if patch_stride is not None else patch_size
+    mask_gt = F.avg_pool2d(mask_pix, kernel_size=patch_size, stride=stride)
 
     if added_batch:
         mask_gt = mask_gt.squeeze(0)

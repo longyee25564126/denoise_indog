@@ -64,6 +64,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=8, help="DataLoader batch size.")
     parser.add_argument("--num-workers", type=int, default=4, help="DataLoader num_workers.")
     parser.add_argument("--patch-size", type=int, required=True, help="Patch size for divisibility checks in wrapper.")
+    parser.add_argument("--patch-stride", type=int, default=None, help="Patch stride for overlapping patches (default: patch_size).")
     parser.add_argument("--crop-size", type=int, default=None, help="Optional crop size (must divide patch size).")
     parser.add_argument("--augment", action="store_true", help="Enable flips/rotations; usually keep off for stats.")
     parser.add_argument("--fit-to-patch", action="store_true", help="Center-crop to nearest patch-aligned size if needed.")
@@ -82,6 +83,8 @@ def _collate_list(batch: List[Any]) -> List[Any]:
 
 def main() -> None:
     args = parse_args()
+    if args.patch_stride is None:
+        args.patch_stride = args.patch_size
     device_str = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     device = torch.device(device_str)
 
@@ -89,6 +92,7 @@ def main() -> None:
     ds = ExternalPairedBitPlaneDataset(
         base_dataset=base_ds,
         patch_size=args.patch_size,
+        patch_stride=args.patch_stride,
         crop_size=args.crop_size,
         augment=args.augment,
         return_mask_flat=False,

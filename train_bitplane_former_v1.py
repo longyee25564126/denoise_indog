@@ -17,7 +17,7 @@ import yaml
 from datasets.external_adapter import ExternalPairedBitPlaneDataset
 from models.bitplane_former_v1 import BitPlaneFormerV1
 from datasets.bitplane_utils import to_uint8, expand_bits
-from metrics import LPIPS, ssim
+
 
 
 def parse_args() -> argparse.Namespace:
@@ -29,6 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--val-split", type=str, default=None, help="Split name for validation (optional).")
     parser.add_argument("--external-module", type=str, default="/home/longyee/datasets/dataset_and_data_loader/data_loader.py", help="Path to data_loader.py defining PairedImageDataset.")
     parser.add_argument("--patch-size", type=int, default=8)
+    parser.add_argument("--patch-stride", type=int, default=None, help="Patch stride for overlapping patches (default: patch_size).")
     parser.add_argument("--crop-size", type=int, default=None)
     parser.add_argument("--augment", action="store_true", help="Enable flip/rot90 augmentation for training.")
     parser.add_argument("--fit-to-patch", action="store_true", help="Center-crop to nearest patch-aligned size.")
@@ -78,6 +79,7 @@ def build_dataloader(args: argparse.Namespace, split: str, train: bool) -> DataL
     ds = ExternalPairedBitPlaneDataset(
         base_dataset=base_dataset,
         patch_size=args.patch_size,
+        patch_stride=args.patch_stride,
         crop_size=args.crop_size,
         augment=args.augment if train else False,
         return_mask_flat=False,
@@ -195,6 +197,7 @@ def main() -> None:
 
     model = BitPlaneFormerV1(
         patch_size=args.patch_size,
+        patch_stride=args.patch_stride,
         lsb_bits=lsb_bits,
         msb_bits=msb_bits,
         dec_type=args.dec_type,
@@ -258,7 +261,9 @@ def main() -> None:
             optimizer.zero_grad(set_to_none=True)
             with autocast(enabled=args.amp):
                 out = model({"x": x, "lsb": lsb, "msb": msb})
-                loss_recon = F.l1_loss(out["y_hat"], y)
+                r_gt = x - y
+                r_pred = out["residual_gated"]
+                loss_recon = F.l1_loss(r_pred, r_gt)
                 if out["m_hat"] is None or mask_gt is None or args.lambda_mask == 0:
                     loss_mask = torch.tensor(0.0, device=device)
                     loss = loss_recon
@@ -292,14 +297,14 @@ def main() -> None:
                     if out["m_hat"] is None or mask_gt is None:
                         log_msg = (
                             f"Epoch {epoch+1} Step {step+1}/{len(train_loader)} "
-                            f"loss {loss.item():.4f} (recon {loss_recon.item():.4f}) "
+                            f"loss {loss.item():.4f} (residual {loss_recon.item():.4f}) "
                             f"lr {optimizer.param_groups[0]['lr']:.6f}"
                         )
                     else:
                         m_hat = out["m_hat"]
                         log_msg = (
                             f"Epoch {epoch+1} Step {step+1}/{len(train_loader)} "
-                            f"loss {loss.item():.4f} (recon {loss_recon.item():.4f}, mask {loss_mask.item():.4f}) "
+                            f"loss {loss.item():.4f} (residual {loss_recon.item():.4f}, mask {loss_mask.item():.4f}) "
                             f"mask_gt mean/std/min/max {mask_gt.mean().item():.4f}/{mask_gt.std().item():.4f}/"
                             f"{mask_gt.min().item():.4f}/{mask_gt.max().item():.4f} "
                             f"m_hat mean/std/min/max {m_hat.mean().item():.4f}/{m_hat.std().item():.4f}/"

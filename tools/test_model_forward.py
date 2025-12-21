@@ -41,6 +41,7 @@ def build_dataset(args):
             module_path=args.external_module,
             root_dir=args.root,
             patch_size=args.patch_size,
+            patch_stride=args.patch_stride,
             crop_size=args.crop_size,
             augment=args.augment,
             return_mask_flat=False,
@@ -61,6 +62,7 @@ def build_dataset(args):
             root=data_root,
             pairs_file=args.pairs_file,
             patch_size=args.patch_size,
+            patch_stride=args.patch_stride,
             crop_size=args.crop_size,
             augment=args.augment,
             strict_pairing=True,
@@ -86,6 +88,7 @@ def main() -> None:
     )
     parser.add_argument("--split", type=str, default="train", help="Split name when using external loader.")
     parser.add_argument("--patch-size", type=int, default=8)
+    parser.add_argument("--patch-stride", type=int, default=None)
     parser.add_argument("--crop-size", type=int, default=256)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -98,6 +101,8 @@ def main() -> None:
     parser.add_argument("--use-fit-to-patch", action="store_true", help="Center-crop to nearest patch-aligned size if needed (external loader).")
     args = parser.parse_args()
 
+    if args.patch_stride is None:
+        args.patch_stride = args.patch_size
     ds, tmp_root = build_dataset(args)
     try:
         dl = DataLoader(
@@ -112,6 +117,7 @@ def main() -> None:
         device = torch.device(args.device)
         model = BitPlaneFormerV1(
             patch_size=args.patch_size,
+            patch_stride=args.patch_stride,
             embed_dim=256,
             num_heads=8,
             msb_depth=6,
