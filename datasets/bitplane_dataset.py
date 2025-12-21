@@ -72,7 +72,7 @@ class BitPlanePairDataset(Dataset):
         strict_pairing: bool = True,
         return_mask_flat: bool = False,
         use_residual_mask: bool = True,
-        mask_temperature: float = 32.0,
+        mask_temperature: float = 48.0,
         mask_use_quantile: bool = False,
         mask_quantile: float = 0.9,
         lsb_bits: tuple[int, int] | list[int] = (0, 5),
