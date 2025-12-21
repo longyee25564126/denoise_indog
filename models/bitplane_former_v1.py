@@ -99,12 +99,27 @@ class BitPlaneFormerV1(nn.Module):
         T_msb = self.msb_encoder(T_msb0)
 
         if self.dec_type == "std_encdec_msb":
-            dec_out = self.decoder(x_rgb, T_msb, None, None, grid_shape)
+            T_lsb0, grid_shape_lsb = self.lsb_tokenizer(lsb)
+            assert grid_shape == grid_shape_lsb, "MSB/LSB grids mismatch"
+            mask_out = self.mask_head(T_lsb0, grid_shape)
+            m_hat = mask_out["m_hat"]
+            m_hat_tok = mask_out["m_hat_tok"]
+
+            if mask_override is not None:
+                if mask_override.ndim == 3:
+                    mask_override = mask_override.unsqueeze(0)
+                assert mask_override.shape[0] == x_rgb.shape[0], "mask_override batch mismatch"
+                h, w = grid_shape
+                assert mask_override.shape[2] == h and mask_override.shape[3] == w, "mask_override spatial mismatch"
+                m_hat = mask_override
+                m_hat_tok = m_hat.permute(0, 2, 3, 1).contiguous().view(x_rgb.shape[0], -1, 1)
+
+            dec_out = self.decoder(x_rgb, T_msb, T_lsb0, m_hat_tok, grid_shape)
             out = {
                 "y_hat": dec_out["y_hat"],
                 "residual_gated": dec_out["residual_gated"],
-                "m_logits": None,
-                "m_hat": None,
+                "m_logits": mask_out["m_logits"],
+                "m_hat": m_hat,
             }
             return out
 

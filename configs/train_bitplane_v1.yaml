@@ -14,7 +14,7 @@ batch_size: 16
 num_workers: 4
 lr: 1.0e-4
 weight_decay: 0.01
-warmup_epochs: 0.0   # warmup duration in epochs; converted to steps internally
+warmup_epochs: 1.0   # warmup duration in epochs; converted to steps internally
 lambda_mask: 0.4
 mask_T: 48.0
 mask_type: "soft"      # "soft" uses SmoothL1 on continuous mask, "binary" uses BCE on thresholded mask_gt

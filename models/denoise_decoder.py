@@ -200,6 +200,8 @@ class DenoiseDecoderStdEncDec(nn.Module):
         h, w = grid_shape
         B, N, D = msb_tokens.shape
         assert N == h * w, f"Token count {N} != grid {h}x{w}"
+        assert lsb_tokens is not None, "LSB tokens required for std_encdec decoder"
+        assert lsb_tokens.shape == (B, N, D), "LSB tokens shape mismatch"
 
         # Interpolate learnable 2D queries to current grid then flatten
         q2d = torch.nn.functional.interpolate(
@@ -211,7 +213,12 @@ class DenoiseDecoderStdEncDec(nn.Module):
         q = q2d.flatten(2).permute(0, 2, 1)  # (1, h*w, D)
         q = q.expand(B, -1, -1).contiguous()  # (B, N, D)
 
-        T_dec = self.decoder(tgt=q, memory=msb_tokens)  # (B, N, D)
+        memory = lsb_tokens
+        if m_hat_tok is not None:
+            assert m_hat_tok.shape[0] == B and m_hat_tok.shape[1] == N, "mask token shape mismatch"
+            memory = memory * m_hat_tok
+
+        T_dec = self.decoder(tgt=q, memory=memory)  # (B, N, D)
 
         R_tok = self.residual_head(T_dec)  # (B, N, 3*P*P)
         residual = unpatchify(R_tok, h, w, self.patch_size)  # (B,3,H,W)

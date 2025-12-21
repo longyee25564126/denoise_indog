@@ -258,7 +258,7 @@ def main() -> None:
             with autocast(enabled=args.amp):
                 out = model({"x": x, "lsb": lsb, "msb": msb})
                 loss_recon = F.l1_loss(out["y_hat"], y)
-                if args.dec_type == "std_encdec_msb":
+                if out["m_hat"] is None or mask_gt is None or args.lambda_mask == 0:
                     loss_mask = torch.tensor(0.0, device=device)
                     loss = loss_recon
                 else:
@@ -288,7 +288,7 @@ def main() -> None:
 
             if (step + 1) % args.log_interval == 0:
                 with torch.no_grad():
-                    if args.dec_type == "std_encdec_msb":
+                    if out["m_hat"] is None or mask_gt is None:
                         log_msg = (
                             f"Epoch {epoch+1} Step {step+1}/{len(train_loader)} "
                             f"loss {loss.item():.4f} (recon {loss_recon.item():.4f}) "
