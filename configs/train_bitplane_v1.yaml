@@ -10,19 +10,19 @@ fit_to_patch: false
 lsb_bits: [0, 1, 2, 3, 4, 5]
 msb_bits: [6, 7]
 dec_type: "fuse_encoder"  # use decoder_q_msb / fuse_encoder / std_encdec_msb
-epochs: 50
+epochs: 30
 batch_size: 8
 num_workers: 4
 lr: 5.0e-5
 weight_decay: 0.01
 warmup_epochs: 1.0   # warmup duration in epochs; converted to steps internally
 lambda_mask: 1.0
-mask_T: 48.0
+mask_T: 24.0           # 用來調整 mask 的「敏感度」
 mask_type: "soft"      # "soft" uses SmoothL1 on continuous mask, "binary" uses BCE on thresholded mask_gt
 mask_thresh: 0.5       # threshold for binary mask_gt
 grad_clip: 1.0
 amp: true
-save_dir: "outputs/train_bitplane_v1_fuse_encoder"
+save_dir: "outputs/train_bitplane_v1_fuse_encoder/mask_t_24"
 resume: null
 log_interval: 50
 compute_lpips: false

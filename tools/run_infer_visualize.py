@@ -6,7 +6,7 @@ from typing import Tuple
 
 import torch
 import torch.nn.functional as F
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 FILE_DIR = os.path.dirname(__file__)
 ROOT_DIR = os.path.abspath(os.path.join(FILE_DIR, ".."))
@@ -30,6 +30,13 @@ def tensor_to_pil(img: torch.Tensor) -> Image.Image:
         return Image.fromarray(arr, mode="L")
     else:
         raise ValueError(f"Unexpected tensor shape for image: {tuple(img.shape)}")
+
+
+def _text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> tuple[int, int]:
+    if hasattr(draw, "textbbox"):
+        bbox = draw.textbbox((0, 0), text, font=font)
+        return bbox[2] - bbox[0], bbox[3] - bbox[1]
+    return draw.textsize(text, font=font)  # type: ignore[attr-defined]
 
 
 def compute_mask_gt(
@@ -170,36 +177,45 @@ def main() -> None:
     m_pred = out.get("m_hat", None)
     m_gt = mask_gt.cpu().squeeze(0)
 
-    # Build a 5-grid image: noisy, clean, denoised, mask_pred (if exists), mask_gt
-    def to_uint8_img(t: torch.Tensor, mode: str) -> Image.Image:
-        return tensor_to_pil(t)
-
+    # Build a labeled grid with equal-sized cells.
     imgs = [
-        ("noisy", to_uint8_img(x_vis, "RGB")),
-        ("clean", to_uint8_img(y_vis, "RGB")),
-        ("denoised", to_uint8_img(y_hat, "RGB")),
+        ("noisy", tensor_to_pil(x_vis)),
+        ("clean", tensor_to_pil(y_vis)),
+        ("denoised", tensor_to_pil(y_hat)),
     ]
     if m_pred is not None:
         imgs.append(("mask_pred", tensor_to_pil(m_pred.detach().cpu().squeeze(0))))
     imgs.append(("mask_gt", tensor_to_pil(m_gt)))
 
-    # Determine grid layout (single row)
-    widths = [img.size[0] for _, img in imgs]
-    heights = [img.size[1] for _, img in imgs]
-    max_h = max(heights)
-    total_w = sum(widths)
-    grid = Image.new("RGB", (total_w, max_h), color=(0, 0, 0))
-
-    x_offset = 0
-    draw_positions = {}
+    target_w, target_h = imgs[0][1].size
+    resized = []
     for name, img in imgs:
+        is_mask = name.startswith("mask")
         if img.mode != "RGB":
-            img_rgb = img.convert("RGB")
-        else:
-            img_rgb = img
-        grid.paste(img_rgb, (x_offset, 0))
-        draw_positions[name] = x_offset
-        x_offset += img_rgb.size[0]
+            img = img.convert("RGB")
+        if img.size != (target_w, target_h):
+            resample = Image.NEAREST if is_mask else Image.BILINEAR
+            img = img.resize((target_w, target_h), resample=resample)
+        resized.append((name, img))
+
+    font = ImageFont.load_default()
+    tmp = Image.new("RGB", (10, 10), color=(255, 255, 255))
+    draw_tmp = ImageDraw.Draw(tmp)
+    header_h = max(_text_size(draw_tmp, name, font)[1] for name, _ in resized) + 8
+
+    cols = len(resized)
+    grid_w = cols * target_w
+    grid_h = header_h + target_h
+    grid = Image.new("RGB", (grid_w, grid_h), color=(255, 255, 255))
+    draw = ImageDraw.Draw(grid)
+
+    for i, (name, img) in enumerate(resized):
+        x0 = i * target_w
+        tw, th = _text_size(draw, name, font)
+        tx = x0 + (target_w - tw) // 2
+        ty = (header_h - th) // 2
+        draw.text((tx, ty), name, fill=(0, 0, 0), font=font)
+        grid.paste(img, (x0, header_h))
 
     os.makedirs(args.save_dir, exist_ok=True)
     stem = os.path.splitext(os.path.basename(sample.get("path_noisy") or f"idx_{idx}"))[0]
