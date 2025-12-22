@@ -89,6 +89,7 @@ def main() -> None:
     parser.add_argument("--split", type=str, default="train", help="Split name when using external loader.")
     parser.add_argument("--patch-size", type=int, default=8)
     parser.add_argument("--patch-stride", type=int, default=None)
+    parser.add_argument("--pad-size", type=int, default=0)
     parser.add_argument("--crop-size", type=int, default=256)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -118,6 +119,7 @@ def main() -> None:
         model = BitPlaneFormerV1(
             patch_size=args.patch_size,
             patch_stride=args.patch_stride,
+            pad_size=args.pad_size,
             embed_dim=256,
             num_heads=8,
             msb_depth=6,

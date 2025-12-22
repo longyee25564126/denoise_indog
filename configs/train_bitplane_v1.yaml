@@ -4,6 +4,7 @@ train_split: "train"
 val_split: "val"
 patch_size: 8
 patch_stride: 4
+pad_size: 4
 crop_size: 256            #資料載入時的隨機裁切邊長（像素）
 augment: true
 fit_to_patch: false
@@ -17,12 +18,12 @@ lr: 5.0e-5
 weight_decay: 0.01
 warmup_epochs: 1.0   # warmup duration in epochs; converted to steps internally
 lambda_mask: 1.0
-mask_T: 24.0           # 用來調整 mask 的「敏感度」
+mask_T: 48.0           # 用來調整 mask 的「敏感度」
 mask_type: "soft"      # "soft" uses SmoothL1 on continuous mask, "binary" uses BCE on thresholded mask_gt
 mask_thresh: 0.5       # threshold for binary mask_gt
 grad_clip: 1.0
 amp: true
-save_dir: "outputs/train_bitplane_v1_fuse_encoder/mask_t_24"
+save_dir: "outputs/train_bitplane_v1_fuse_encoder/mask_t_48"
 resume: null
 log_interval: 50
 compute_lpips: false

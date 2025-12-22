@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from .tokenizer_cnn import ConvPatchTokenizer
@@ -13,6 +14,7 @@ class BitPlaneFormerV1(nn.Module):
         self,
         patch_size: int = 8,
         patch_stride: int | None = None,
+        pad_size: int = 0,
         embed_dim: int = 256,
         num_heads: int = 8,
         msb_depth: int = 6,
@@ -27,6 +29,11 @@ class BitPlaneFormerV1(nn.Module):
         super().__init__()
         self.patch_size = patch_size
         self.patch_stride = patch_stride if patch_stride is not None else patch_size
+        if pad_size < 0:
+            raise ValueError("pad_size must be >= 0")
+        if pad_size % self.patch_stride != 0:
+            raise ValueError("pad_size must be divisible by patch_stride")
+        self.pad_size = pad_size
 
         lsb_bit_list = expand_bits(lsb_bits)
         msb_bit_list = expand_bits(msb_bits)
@@ -112,6 +119,13 @@ class BitPlaneFormerV1(nn.Module):
         assert msb.shape[1] == self.msb_in_ch, f"Expected MSB channels {self.msb_in_ch}, got {msb.shape[1]}"
         assert lsb is not None and lsb.shape[1] == self.lsb_in_ch, f"Expected LSB channels {self.lsb_in_ch}, got {lsb.shape[1]}"
 
+        # Optional zero padding for better border context
+        if self.pad_size > 0:
+            pad = self.pad_size
+            x_rgb = F.pad(x_rgb, (pad, pad, pad, pad), mode="constant", value=0.0)
+            msb = F.pad(msb, (pad, pad, pad, pad), mode="constant", value=0.0)
+            lsb = F.pad(lsb, (pad, pad, pad, pad), mode="constant", value=0.0)
+
         # Tokenize
         T_msb0, grid_shape = self.msb_tokenizer(msb)
         T_msb = self.msb_encoder(T_msb0)
@@ -121,24 +135,56 @@ class BitPlaneFormerV1(nn.Module):
         T_lsb = self.lsb_encoder(T_lsb0)
 
         mask_out = self.mask_head(T_lsb, grid_shape)
-        m_hat = mask_out["m_hat"]
-        m_hat_tok = mask_out["m_hat_tok"]
+        m_logits_full = mask_out["m_logits"]
+        m_hat_full = mask_out["m_hat"]
+        m_hat_tok_full = mask_out["m_hat_tok"]
 
         if mask_override is not None:
             if mask_override.ndim == 3:
                 mask_override = mask_override.unsqueeze(0)
             assert mask_override.shape[0] == x_rgb.shape[0], "mask_override batch mismatch"
             h, w = grid_shape
-            assert mask_override.shape[2] == h and mask_override.shape[3] == w, "mask_override spatial mismatch"
-            m_hat = mask_override
-            m_hat_tok = m_hat.permute(0, 2, 3, 1).contiguous().view(x_rgb.shape[0], -1, 1)
+            pad_tokens = self.pad_size // self.patch_stride
+            if pad_tokens > 0:
+                exp_h = h - 2 * pad_tokens
+                exp_w = w - 2 * pad_tokens
+                assert mask_override.shape[2] == exp_h and mask_override.shape[3] == exp_w, "mask_override spatial mismatch"
+                mask_override_pad = F.pad(
+                    mask_override,
+                    (pad_tokens, pad_tokens, pad_tokens, pad_tokens),
+                    mode="constant",
+                    value=0.0,
+                )
+                assert mask_override_pad.shape[2] == h and mask_override_pad.shape[3] == w, "mask_override spatial mismatch"
+                m_hat_full = mask_override_pad
+            else:
+                assert mask_override.shape[2] == h and mask_override.shape[3] == w, "mask_override spatial mismatch"
+                m_hat_full = mask_override
+            m_hat_tok_full = m_hat_full.permute(0, 2, 3, 1).contiguous().view(x_rgb.shape[0], -1, 1)
 
-        dec_out = self.decoder(x_rgb, T_msb, T_lsb, m_hat_tok, grid_shape)
+        dec_out = self.decoder(x_rgb, T_msb, T_lsb, m_hat_tok_full, grid_shape)
+
+        if self.pad_size > 0:
+            pad = self.pad_size
+            dec_out["residual_gated"] = dec_out["residual_gated"][..., pad:-pad, pad:-pad]
+            dec_out["y_hat"] = dec_out["y_hat"][..., pad:-pad, pad:-pad]
+
+        if self.pad_size > 0:
+            pad_tokens = self.pad_size // self.patch_stride
+            if pad_tokens > 0:
+                m_hat = m_hat_full[:, :, pad_tokens:-pad_tokens, pad_tokens:-pad_tokens]
+                m_logits = m_logits_full[:, :, pad_tokens:-pad_tokens, pad_tokens:-pad_tokens]
+            else:
+                m_hat = m_hat_full
+                m_logits = m_logits_full
+        else:
+            m_hat = m_hat_full
+            m_logits = m_logits_full
 
         out = {
             "y_hat": dec_out["y_hat"],
             "residual_gated": dec_out["residual_gated"],
-            "m_logits": mask_out["m_logits"],
+            "m_logits": m_logits,
             "m_hat": m_hat,
         }
         return out

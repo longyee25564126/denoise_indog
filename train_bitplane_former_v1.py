@@ -30,6 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--external-module", type=str, default="/home/longyee/datasets/dataset_and_data_loader/data_loader.py", help="Path to data_loader.py defining PairedImageDataset.")
     parser.add_argument("--patch-size", type=int, default=8)
     parser.add_argument("--patch-stride", type=int, default=None, help="Patch stride for overlapping patches (default: patch_size).")
+    parser.add_argument("--pad-size", type=int, default=0, help="Zero padding size applied in the model (pixels).")
     parser.add_argument("--crop-size", type=int, default=None)
     parser.add_argument("--augment", action="store_true", help="Enable flip/rot90 augmentation for training.")
     parser.add_argument("--fit-to-patch", action="store_true", help="Center-crop to nearest patch-aligned size.")
@@ -198,6 +199,7 @@ def main() -> None:
     model = BitPlaneFormerV1(
         patch_size=args.patch_size,
         patch_stride=args.patch_stride,
+        pad_size=args.pad_size,
         lsb_bits=lsb_bits,
         msb_bits=msb_bits,
         dec_type=args.dec_type,
@@ -220,12 +222,6 @@ def main() -> None:
 
     scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
 
-    start_epoch = 0
-    best_psnr = -1e9
-    if args.resume:
-        start_epoch, best_psnr = load_checkpoint(args.resume, model, optimizer, scaler)
-        log_write(f"Resumed from {args.resume} at epoch {start_epoch}, best_psnr={best_psnr:.3f}")
-
     os.makedirs(args.save_dir, exist_ok=True)
     log_path = os.path.join(args.save_dir, "train.log")
     # Truncate existing log on each run
@@ -241,6 +237,12 @@ def main() -> None:
     for k, v in sorted(vars(args).items()):
         log_write(f"{k}: {v}")
     log_write("================================")
+
+    start_epoch = 0
+    best_psnr = -1e9
+    if args.resume:
+        start_epoch, best_psnr = load_checkpoint(args.resume, model, optimizer, scaler)
+        log_write(f"Resumed from {args.resume} at epoch {start_epoch}, best_psnr={best_psnr:.3f}")
 
     global_step = 0
     for epoch in range(start_epoch, args.epochs):

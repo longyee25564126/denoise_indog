@@ -39,6 +39,28 @@ def _text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) 
     return draw.textsize(text, font=font)  # type: ignore[attr-defined]
 
 
+def _tokens_to_heatmap(
+    tokens: torch.Tensor,
+    grid_shape: tuple[int, int],
+    out_size: tuple[int, int],
+    pad_tokens: int = 0,
+) -> torch.Tensor:
+    """
+    Convert tokens (B, N, D) to a normalized heatmap (B, 1, H, W).
+    """
+    B, N, _ = tokens.shape
+    h, w = grid_shape
+    assert N == h * w, f"Token count {N} != grid {h}x{w}"
+    mag = tokens.norm(dim=-1).view(B, 1, h, w)
+    if pad_tokens > 0:
+        mag = mag[:, :, pad_tokens:-pad_tokens, pad_tokens:-pad_tokens]
+    mag_min = mag.view(B, -1).min(dim=1, keepdim=True)[0].view(B, 1, 1, 1)
+    mag_max = mag.view(B, -1).max(dim=1, keepdim=True)[0].view(B, 1, 1, 1)
+    mag = (mag - mag_min) / (mag_max - mag_min + 1e-6)
+    mag = F.interpolate(mag, size=out_size, mode="nearest")
+    return mag
+
+
 def compute_mask_gt(
     x: torch.Tensor,
     y: torch.Tensor,
@@ -98,6 +120,7 @@ def main() -> None:
     parser.add_argument("--name", type=str, default=None, help="Substring to pick sample by filename (noisy or clean).")
     parser.add_argument("--patch-size", type=int, default=8)
     parser.add_argument("--patch-stride", type=int, default=None, help="Patch stride for overlapping patches (default: patch_size).")
+    parser.add_argument("--pad-size", type=int, default=0, help="Zero padding size applied in the model (pixels).")
     parser.add_argument("--crop-size", type=int, default=None)
     parser.add_argument("--augment", action="store_true", help="Enable augment for loading (usually off for eval).")
     parser.add_argument("--fit-to-patch", action="store_true", help="Center-crop to nearest patch-aligned size.")
@@ -121,6 +144,8 @@ def main() -> None:
             ckpt_args = ckpt.get("args", {}) or {}
             if args.patch_stride is None and "patch_stride" in ckpt_args:
                 args.patch_stride = ckpt_args["patch_stride"]
+            if "pad_size" in ckpt_args:
+                args.pad_size = ckpt_args["pad_size"]
             if args.dec_type is None and "dec_type" in ckpt_args:
                 args.dec_type = ckpt_args["dec_type"]
             if "patch_size" in ckpt_args and ckpt_args["patch_size"] != args.patch_size:
@@ -158,6 +183,7 @@ def main() -> None:
     model = BitPlaneFormerV1(
         patch_size=args.patch_size,
         patch_stride=args.patch_stride,
+        pad_size=args.pad_size,
         lsb_bits=args.lsb_bits,
         msb_bits=args.msb_bits,
         dec_type=args.dec_type or "fuse_encoder",
@@ -170,18 +196,28 @@ def main() -> None:
     with torch.no_grad():
         out = model({"x": x, "lsb": lsb, "msb": msb})
         mask_gt = compute_mask_gt(x, y, args.patch_size, args.patch_stride, args.mask_T)
+        msb_for_vis = msb
+        if model.pad_size > 0:
+            pad = model.pad_size
+            msb_for_vis = F.pad(msb, (pad, pad, pad, pad), mode="constant", value=0.0)
+        T_msb0, grid_shape = model.msb_tokenizer(msb_for_vis)
+        T_msb = model.msb_encoder(T_msb0)
+        pad_tokens = model.pad_size // model.patch_stride if model.pad_size > 0 else 0
+        msb_vis = _tokens_to_heatmap(T_msb, grid_shape, x.shape[-2:], pad_tokens=pad_tokens)
 
     y_hat = out["y_hat"].clamp(0.0, 1.0).squeeze(0)
     x_vis = x.squeeze(0)
     y_vis = y.squeeze(0)
     m_pred = out.get("m_hat", None)
     m_gt = mask_gt.cpu().squeeze(0)
+    msb_map = msb_vis.cpu().squeeze(0)
 
     # Build a labeled grid with equal-sized cells.
     imgs = [
         ("noisy", tensor_to_pil(x_vis)),
         ("clean", tensor_to_pil(y_vis)),
         ("denoised", tensor_to_pil(y_hat)),
+        ("msb_enc", tensor_to_pil(msb_map)),
     ]
     if m_pred is not None:
         imgs.append(("mask_pred", tensor_to_pil(m_pred.detach().cpu().squeeze(0))))

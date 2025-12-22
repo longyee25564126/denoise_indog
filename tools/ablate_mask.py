@@ -25,6 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split", type=str, default="val")
     parser.add_argument("--patch-size", type=int, default=8)
     parser.add_argument("--patch-stride", type=int, default=None, help="Patch stride for overlapping patches (default: patch_size).")
+    parser.add_argument("--pad-size", type=int, default=0, help="Zero padding size applied in the model (pixels).")
     parser.add_argument("--crop-size", type=int, default=None)
     parser.add_argument("--fit-to-patch", action="store_true")
     parser.add_argument("--lsb-bits", type=int, nargs="+", default=[0, 1, 2, 3, 4, 5])
@@ -113,6 +114,7 @@ def main() -> None:
     _override_from_ckpt("dec_type")
     _override_from_ckpt("patch_size")
     _override_from_ckpt("patch_stride")
+    _override_from_ckpt("pad_size")
     _override_from_ckpt("lsb_bits")
     _override_from_ckpt("msb_bits")
 
@@ -127,6 +129,7 @@ def main() -> None:
     model = BitPlaneFormerV1(
         patch_size=args.patch_size,
         patch_stride=args.patch_stride,
+        pad_size=args.pad_size,
         lsb_bits=args.lsb_bits,
         msb_bits=args.msb_bits,
         dec_type=args.dec_type or "fuse_encoder",
