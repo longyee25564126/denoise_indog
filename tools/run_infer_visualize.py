@@ -54,8 +54,8 @@ def _tokens_to_heatmap(
     mag = tokens.norm(dim=-1).view(B, 1, h, w)
     if pad_tokens > 0:
         mag = mag[:, :, pad_tokens:-pad_tokens, pad_tokens:-pad_tokens]
-    mag_min = mag.view(B, -1).min(dim=1, keepdim=True)[0].view(B, 1, 1, 1)
-    mag_max = mag.view(B, -1).max(dim=1, keepdim=True)[0].view(B, 1, 1, 1)
+    mag_min = mag.reshape(B, -1).min(dim=1, keepdim=True)[0].view(B, 1, 1, 1)
+    mag_max = mag.reshape(B, -1).max(dim=1, keepdim=True)[0].view(B, 1, 1, 1)
     mag = (mag - mag_min) / (mag_max - mag_min + 1e-6)
     mag = F.interpolate(mag, size=out_size, mode="nearest")
     return mag
