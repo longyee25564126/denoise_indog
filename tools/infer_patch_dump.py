@@ -77,13 +77,28 @@ def main():
     device_str = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     device = torch.device(device_str)
 
-    if args.patch_stride is None:
-        args.patch_stride = args.patch_size
-
     # Load Model
     ckpt = torch.load(args.checkpoint, map_location="cpu")
     ckpt_args = ckpt.get("args", {}) if isinstance(ckpt, dict) else {}
-    
+
+    # Align key settings with checkpoint when available.
+    def _override_from_ckpt(name: str) -> None:
+        if name in ckpt_args:
+            new_val = ckpt_args[name]
+            cur_val = getattr(args, name, None)
+            if cur_val != new_val:
+                print(f"Override {name}: {cur_val} -> {new_val} (from checkpoint)")
+                setattr(args, name, new_val)
+
+    _override_from_ckpt("patch_size")
+    _override_from_ckpt("patch_stride")
+    _override_from_ckpt("pad_size")
+    _override_from_ckpt("lsb_bits")
+    _override_from_ckpt("msb_bits")
+
+    if args.patch_stride is None:
+        args.patch_stride = args.patch_size
+
     # Allow CLI to override, but default to checkpoint values if not specified
     dec_type = ckpt_args.get("dec_type", "fuse_encoder")
     
@@ -164,6 +179,9 @@ def main():
     # Output Text
     out_stream = sys.stdout
     if args.dump_file:
+        dump_dir = os.path.dirname(args.dump_file)
+        if dump_dir:
+            os.makedirs(dump_dir, exist_ok=True)
         out_stream = open(args.dump_file, "w")
         
     try:
