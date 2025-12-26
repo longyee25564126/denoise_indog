@@ -53,15 +53,22 @@ class DenoiseDecoder(nn.Module):
         dropout: float = 0.0,
         patch_size: int = 8,
         patch_stride: int | None = None,
-        use_concat_fuse: bool = True,
+        patch_stride: int | None = None,
+        fusion_type: str = "concat",
         clamp_output: bool = False,
     ):
         super().__init__()
         self.patch_size = patch_size
         self.patch_stride = patch_stride if patch_stride is not None else patch_size
         self.clamp_output = clamp_output
+        self.fusion_type = fusion_type
 
-        self.fuse = nn.Linear(2 * embed_dim, embed_dim) if use_concat_fuse else nn.Identity()
+        if fusion_type == "concat":
+            self.fuse = nn.Linear(2 * embed_dim, embed_dim)
+        elif fusion_type == "add":
+            self.fuse = nn.Identity()
+        else:
+            raise ValueError(f"Unknown fusion_type: {fusion_type}")
 
         ff_dim = int(mlp_ratio * embed_dim)
         layer = nn.TransformerEncoderLayer(
@@ -92,8 +99,12 @@ class DenoiseDecoder(nn.Module):
         assert lsb_tokens.shape == (B, N, D)
         assert m_hat_tok.shape[0] == B and m_hat_tok.shape[1] == N
 
-        T_cat = torch.cat([msb_tokens, lsb_tokens], dim=-1)  # (B, N, 2D)
-        T_in = self.fuse(T_cat)  # (B, N, D)
+        if self.fusion_type == "concat":
+            T_cat = torch.cat([msb_tokens, lsb_tokens], dim=-1)  # (B, N, 2D)
+            T_in = self.fuse(T_cat)  # (B, N, D)
+        else:
+            # add
+            T_in = msb_tokens + lsb_tokens
 
         T_dec = self.decoder(T_in)  # (B, N, D)
 

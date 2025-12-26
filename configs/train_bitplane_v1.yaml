@@ -11,6 +11,7 @@ fit_to_patch: false
 lsb_bits: [0, 1, 2, 3, 4, 5]
 msb_bits: [6, 7]
 dec_type: "fuse_encoder"  # use decoder_q_msb / fuse_encoder / std_encdec_msb
+fusion_type: "concat"     # concat / add 可選
 epochs: 30
 batch_size: 8
 num_workers: 4

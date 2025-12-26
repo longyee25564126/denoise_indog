@@ -25,6 +25,7 @@ class BitPlaneFormerV1(nn.Module):
         msb_bits: tuple[int, int] | list[int] = (6, 7),
         dec_type: str = "fuse_encoder",
         lsb_depth: int | None = None,
+        fusion_type: str = "concat",
     ):
         super().__init__()
         self.patch_size = patch_size
@@ -67,7 +68,7 @@ class BitPlaneFormerV1(nn.Module):
                 dropout=dropout,
                 patch_size=patch_size,
                 patch_stride=self.patch_stride,
-                use_concat_fuse=True,
+                fusion_type=fusion_type,
                 clamp_output=False,
             )
         elif dec_type == "decoder_q_msb":
