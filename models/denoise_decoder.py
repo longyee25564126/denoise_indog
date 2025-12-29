@@ -56,12 +56,14 @@ class DenoiseDecoder(nn.Module):
         patch_stride: int | None = None,
         fusion_type: str = "concat",
         clamp_output: bool = False,
+        use_mask: bool = True,
     ):
         super().__init__()
         self.patch_size = patch_size
         self.patch_stride = patch_stride if patch_stride is not None else patch_size
         self.clamp_output = clamp_output
         self.fusion_type = fusion_type
+        self.use_mask = use_mask
 
         if fusion_type == "concat":
             self.fuse = nn.Linear(2 * embed_dim, embed_dim)
@@ -109,7 +111,10 @@ class DenoiseDecoder(nn.Module):
         T_dec = self.decoder(T_in)  # (B, N, D)
 
         R_tok = self.residual_head(T_dec)  # (B, N, 3*P*P)
-        R_tok_gated = R_tok * m_hat_tok  # broadcast gating
+        if self.use_mask:
+            R_tok_gated = R_tok * m_hat_tok  # broadcast gating
+        else:
+            R_tok_gated = R_tok
 
         residual_gated = unpatchify(R_tok_gated, h, w, self.patch_size, self.patch_stride)  # (B,3,H,W)
 

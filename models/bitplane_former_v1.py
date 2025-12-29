@@ -26,6 +26,7 @@ class BitPlaneFormerV1(nn.Module):
         dec_type: str = "fuse_encoder",
         lsb_depth: int | None = None,
         fusion_type: str = "concat",
+        use_mask: bool = True,
     ):
         super().__init__()
         self.patch_size = patch_size
@@ -70,6 +71,7 @@ class BitPlaneFormerV1(nn.Module):
                 patch_stride=self.patch_stride,
                 fusion_type=fusion_type,
                 clamp_output=False,
+                use_mask=use_mask,
             )
         elif dec_type == "decoder_q_msb":
             self.decoder = DenoiseDecoderQMSB(
