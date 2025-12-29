@@ -55,6 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default=None, help='Device (default: "cuda" if available else "cpu").')
     parser.add_argument("--compute-lpips", action="store_true", help="Compute LPIPS in validation (requires lpips package).")
     parser.add_argument("--dec-type", type=str, default="fuse_encoder", choices=["fuse_encoder", "decoder_q_msb", "std_encdec_msb"], help="Decoder variant.")
+    parser.add_argument("--use-mask", type=lambda x: (str(x).lower() == 'true'), default=True, help="Whether to apply the predicted mask to the residual.")
     return parser.parse_args()
 
 
@@ -203,6 +204,7 @@ def main() -> None:
         lsb_bits=lsb_bits,
         msb_bits=msb_bits,
         dec_type=args.dec_type,
+        use_mask=args.use_mask,
     ).to(device)
 
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
