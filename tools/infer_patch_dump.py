@@ -101,6 +101,7 @@ def main():
 
     # Allow CLI to override, but default to checkpoint values if not specified
     dec_type = ckpt_args.get("dec_type", "fuse_encoder")
+    use_mask = ckpt_args.get("use_mask", True)
     
     model = BitPlaneFormerV1(
         patch_size=args.patch_size,
@@ -109,6 +110,7 @@ def main():
         lsb_bits=expand_bits(args.lsb_bits),
         msb_bits=expand_bits(args.msb_bits),
         dec_type=dec_type,
+        use_mask=use_mask,
     ).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
