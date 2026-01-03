@@ -7,10 +7,7 @@ BitPlaneFormer 是一個結合 **位元平面拆解（Bit-plane Decomposition）
 
 本專案的核心思想在於：
 
-> 將影像依位元重要性拆分為 **高位元（MSB）** 與 **低位元（LSB）**，  
-> 分別對應影像的結構資訊與雜訊特性，  
-> 並透過 **遮罩引導的殘差學習（Mask-guided Residual Learning）**  
-> 來提升整體去噪效果。
+> 將影像依位元重要性拆分為 **高位元（MSB）** 與 **低位元（LSB）**，分別對應影像的結構資訊與雜訊特性，並透過 **遮罩引導的殘差學習（Mask-guided Residual Learning）** 來提升整體去噪效果。
 
 ---
 
